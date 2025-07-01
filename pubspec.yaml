@@ -1,4 +1,4 @@
-name: flutter_application_1
+name: nex_pay
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.7.2
+  sdk: '>=3.5.3 <4.0.0'
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -34,11 +34,44 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  local_auth: ^2.1.0
+  local_auth: ^2.3.0
+  country_code_picker: ^3.0.0
+  http: ^1.2.2
+  flutter_secure_storage: ^9.2.2
+  intl: any
+  flutter_form_builder: ^9.3.0
+  form_builder_validators: ^11.0.0
+  intl_phone_field: ^3.2.0
+  smooth_page_indicator: ^1.1.0
+  flutter_native_splash: ^2.4.6
+  logger: ^2.0.2+1
+  material_design_icons_flutter: ^7.0.7296
+
+  #databases
+  supabase_flutter: ^2.9.1
+  sqflite: ^2.3.0 # For SQLite database support
+  path: ^1.8.3 # For file path manipulation
+
+  #offline support
+  connectivity_plus: ^5.0.0 # For network connectivity checks
+  shared_preferences: ^2.2.0 # For storing user preferences locally
+  #qr code
+
+  qr_flutter: ^4.1.0 # For QR code generation and scanning
+  mobile_scanner: ^3.5.0      # Scan QR codes
+
+  # Phone number formatting
+  intl_phone_number_input: ^0.7.4
+
+  #ui components
+  
+  flutter_otp_text_field: ^1.1.1
+  pinput: ^3.0.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+    
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -46,7 +79,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
-
+  
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
