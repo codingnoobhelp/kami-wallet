@@ -9,10 +9,10 @@ class SuccessPage extends StatelessWidget {
     final Logger logger = Logger(); // Initialize logger
 
     final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
-    // Extract arguments from PasscodeSetupPage
-    String? name = args?['name']; // This might come from PersonalInfoPage if you pass it through
+    // Extract arguments. The 'name' argument will now be passed from PersonalInfoPage.
+    String? userName = args?['name'] as String?; // Use a different variable name to avoid confusion with 'name' property
     final String? phoneNumber = args?['phoneNumber'] as String?;
-    final double? initialBalance = args?['initialBalance'] as double?; // This might be null, will default to 0.0
+    final double? initialBalance = args?['initialBalance'] as double?;
 
     void navigateToHome() {
       logger.d('Navigating to Home screen from SuccessPage. Phone: $phoneNumber, Balance: ${initialBalance ?? 0.0}');
@@ -47,7 +47,7 @@ class SuccessPage extends StatelessWidget {
             ),
             const SizedBox(height: 40),
             Text(
-              'Congratulations, ${name ?? 'User'}!', // Use extracted name or 'User'
+              'Congratulations, ${userName ?? 'User'}!', // Use userName here
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 28,

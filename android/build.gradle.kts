@@ -1,3 +1,6 @@
+// This file is the project-level build.gradle.kts
+// It primarily defines repositories for all subprojects and common tasks.
+
 allprojects {
     repositories {
         google()

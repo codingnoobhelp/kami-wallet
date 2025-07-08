@@ -1,247 +1,259 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_form_builder/flutter_form_builder.dart';
-import 'package:form_builder_validators/form_builder_validators.dart';
+import 'package:pinput/pinput.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:logger/logger.dart';
 
 class OtpVerificationPage extends StatefulWidget {
-  const OtpVerificationPage({super.key});
+  final String phoneNumber;
+  final String verificationId;
+  final bool userExists;
+
+  const OtpVerificationPage({
+    super.key,
+    required this.phoneNumber,
+    required this.verificationId,
+    required this.userExists,
+  });
 
   @override
   State<OtpVerificationPage> createState() => _OtpVerificationPageState();
 }
 
 class _OtpVerificationPageState extends State<OtpVerificationPage> {
-  final _otpFormKey = GlobalKey<FormBuilderState>();
-  final List<TextEditingController> _otpControllers =
-      List.generate(6, (index) => TextEditingController());
-  final List<FocusNode> _focusNodes =
-      List.generate(6, (index) => FocusNode());
-
+  final TextEditingController _otpController = TextEditingController();
   final Logger _logger = Logger();
+  bool _isLoading = false;
 
-  String? _phone;
-  String? _expectedOtp; // This would typically come from the backend
-  String? _name; // New: to store name from previous screen
-  String? _email; // New: to store email from previous screen
+  final defaultPinTheme = PinTheme(
+    width: 60,
+    height: 60,
+    textStyle: const TextStyle(
+      fontSize: 24,
+      color: Colors.white,
+      fontWeight: FontWeight.w600,
+    ),
+    decoration: BoxDecoration(
+      color: const Color(0xFF2C2C2E),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Colors.grey.shade700),
+    ),
+  );
+
+  final focusedPinTheme = PinTheme(
+    width: 60,
+    height: 60,
+    textStyle: const TextStyle(
+      fontSize: 24,
+      color: Colors.white,
+      fontWeight: FontWeight.w600,
+    ),
+    decoration: BoxDecoration(
+      color: const Color(0xFF2C2C2E),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: const Color(0xFF007AFF), width: 2),
+    ),
+  );
+
+  final submittedPinTheme = PinTheme(
+    width: 60,
+    height: 60,
+    textStyle: const TextStyle(
+      fontSize: 24,
+      color: Colors.white,
+      fontWeight: FontWeight.w600,
+    ),
+    decoration: BoxDecoration(
+      color: const Color(0xFF2C2C2E),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Colors.grey.shade700),
+    ),
+  );
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
-    if (args != null) {
-      _phone = args['phone'];
-      _expectedOtp = args['otp']; // Mock OTP for demonstration
-      _name = args['name']; // Extract name
-      _email = args['email']; // Extract email
-      _logger.d('OTP screen received phone: $_phone, mock OTP: $_expectedOtp, Name: $_name, Email: $_email');
-    }
+  void dispose() {
+    _otpController.dispose();
+    super.dispose();
   }
 
-  // Helper function to format phone number for display (e.g., +23480... -> 080...)
-  String _formatPhoneNumberForDisplay(String? phoneNumber) {
-    if (phoneNumber == null || phoneNumber.isEmpty) {
-      return 'N/A';
-    }
-    // Check if it's a Nigerian number and format it
-    if (phoneNumber.startsWith('+234') && phoneNumber.length >= 14) {
-      // Assuming typical +23480... format, show as 080...
-      return '0${phoneNumber.substring(4)}';
-    }
-    // For other formats or non-Nigerian numbers, return as is
-    return phoneNumber;
-  }
+  Future<void> _verifyOtp() async {
+    setState(() {
+      _isLoading = true;
+    });
 
-  void _onOtpFieldChanged(int index, String value) {
-    if (value.isNotEmpty) {
-      if (index < _otpControllers.length - 1) {
-        _focusNodes[index + 1].requestFocus();
-      } else {
-        _focusNodes[index].unfocus(); // Unfocus last field
-      }
-    } else if (value.isEmpty) {
-      if (index > 0) {
-        _focusNodes[index - 1].requestFocus();
-      }
-    }
-  }
+    try {
+      PhoneAuthCredential credential = PhoneAuthProvider.credential(
+        verificationId: widget.verificationId,
+        smsCode: _otpController.text,
+      );
 
-  void _verifyOtp() {
-    String enteredOtp = _otpControllers.map((controller) => controller.text).join();
-    _logger.d('Entered OTP: $enteredOtp');
+      _logger.i('Attempting to sign in with credential...');
+      UserCredential userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+      _logger.i('User signed in: ${userCredential.user?.uid}');
 
-    if (enteredOtp == _expectedOtp) {
-      _logger.i('OTP Verified Successfully!');
-      if (mounted) {
-        // Navigate to the PasscodeSetupPage, passing the phone number and other user info
-        Navigator.pushNamed(
+      if (!mounted) return;
+
+      if (widget.userExists) {
+        // Existing user: Navigate to role selection
+        Navigator.pushNamedAndRemoveUntil(
           context,
-          '/passcode', // Navigate to passcode setup
+          '/role_selection',
+          (route) => false,
           arguments: {
-            'phoneNumber': _phone,
-            'name': _name, // Pass name
-            'email': _email, // Pass email
+            'phoneNumber': widget.phoneNumber,
+            'userExists': widget.userExists,
+          },
+        );
+      } else {
+        // New user: Navigate to personal info screen
+        Navigator.pushNamedAndRemoveUntil(
+          context,
+          '/personal',
+          (route) => false,
+          arguments: {
+            'phoneNumber': widget.phoneNumber,
           },
         );
       }
-    } else {
-      _logger.w('OTP Verification Failed: Invalid OTP');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invalid OTP. Please try again.')),
-        );
-        // Clear OTP fields and reset focus
-        for (var controller in _otpControllers) {
-          controller.clear();
-        }
-        _focusNodes[0].requestFocus();
+    } on FirebaseAuthException catch (e) {
+      _logger.e('OTP verification failed: ${e.message}');
+      if (e.code == 'invalid-verification-code') {
+        _showMessageBox(context, 'Invalid OTP. Please try again.');
+      } else {
+        _showMessageBox(context, 'Verification Failed: ${e.message}');
       }
+    } catch (e) {
+      _logger.e('An unexpected error occurred during OTP verification: $e');
+      _showMessageBox(context, 'An unexpected error occurred. Please try again.');
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
     }
+  }
+
+  void _showMessageBox(BuildContext context, String message) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: const Text('Information'),
+          content: Text(message),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('OK'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFF1C1C1E),
       appBar: AppBar(
-        title: const Text(
-          'OTP Verification',
-          style: TextStyle(fontWeight: FontWeight.bold),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
         ),
-        centerTitle: true,
       ),
-      body: SingleChildScrollView(
+      body: Padding(
         padding: const EdgeInsets.all(20.0),
-        child: FormBuilder(
-          key: _otpFormKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Verify your phone number',
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Verify Phone Number',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
               ),
-              const SizedBox(height: 10),
-              RichText(
-                text: TextSpan(
-                  text: 'Enter the 6-digit code sent to ',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Theme.of(context).textTheme.bodyMedium!.color,
-                  ),
-                  children: <TextSpan>[
-                    TextSpan(
-                      text: _formatPhoneNumberForDisplay(_phone),
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Theme.of(context).textTheme.bodyLarge!.color,
-                      ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Enter the 6-digit code sent to ${widget.phoneNumber}',
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 16,
+              ),
+            ),
+            const SizedBox(height: 30),
+            Center(
+              child: Pinput(
+                controller: _otpController,
+                length: 6,
+                defaultPinTheme: defaultPinTheme,
+                focusedPinTheme: focusedPinTheme,
+                submittedPinTheme: submittedPinTheme,
+                obscureText: true,
+                onCompleted: (pin) {
+                  _logger.d('OTP Pinput completed: $pin');
+                  _verifyOtp();
+                },
+                onChanged: (value) {
+                  _logger.d('OTP Pinput changed: $value');
+                },
+                cursor: Column(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 9),
+                      width: 22,
+                      height: 1,
+                      color: const Color(0xFF007AFF),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 30),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: List.generate(6, (index) {
-                  return SizedBox(
-                    width: 50,
-                    height: 50,
-                    child: FormBuilderTextField(
-                      name: 'otp_field_$index',
-                      controller: _otpControllers[index],
-                      focusNode: _focusNodes[index],
-                      textAlign: TextAlign.center,
-                      keyboardType: TextInputType.number,
-                      inputFormatters: [
-                        FilteringTextInputFormatter.digitsOnly,
-                        LengthLimitingTextInputFormatter(1),
-                      ],
-                      decoration: InputDecoration(
-                        filled: true,
-                        fillColor: Theme.of(context).inputDecorationTheme.fillColor,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: Theme.of(context).primaryColor, width: 2.0),
-                        ),
-                        errorBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12.0),
-                          borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
-                        ),
-                        focusedErrorBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12.0),
-                          borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
+            ),
+            const SizedBox(height: 30),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _isLoading ? null : _verifyOtp,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF007AFF),
+                  padding: const EdgeInsets.symmetric(vertical: 15),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: _isLoading
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : const Text(
+                        'Verify',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
                         ),
                       ),
-                      onChanged: (value) => _onOtpFieldChanged(index, value!),
-                      validator: FormBuilderValidators.compose([
-                        FormBuilderValidators.required(),
-                      ]),
-                    ),
-                  );
-                }),
               ),
-              const SizedBox(height: 30),
-              Center(
-                child: TextButton(
-                  onPressed: () {
-                    // Resend OTP logic here
-                    _logger.d('Resend OTP button pressed. New mock OTP: $_expectedOtp');
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('OTP resent')),
-                    );
-                    for (var controller in _otpControllers) {
-                      controller.clear();
-                    }
-                    _focusNodes[0].requestFocus();
-                  },
-                  child: const Text('Didn\'t get the code? Resend OTP'),
+            ),
+            const SizedBox(height: 20),
+            TextButton(
+              onPressed: () {
+                _showMessageBox(context, 'Resend OTP functionality not yet implemented.');
+              },
+              child: const Text(
+                "Didn't receive code? Resend",
+                style: TextStyle(
+                  color: Colors.white70,
                 ),
               ),
-              const SizedBox(height: 30),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _verifyOtp,
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: const Text(
-                    'Proceed',
-                    style: TextStyle(fontSize: 18),
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    for (var controller in _otpControllers) {
-      controller.dispose();
-    }
-    for (var focusNode in _focusNodes) {
-      focusNode.dispose();
-    }
-    super.dispose();
   }
 }

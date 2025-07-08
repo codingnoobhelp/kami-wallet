@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:form_builder_validators/form_builder_validators.dart';
 import 'package:logger/logger.dart';
-import 'dart:math'; // For generating OTP
+import 'package:firebase_auth/firebase_auth.dart'; // Import Firebase Auth
+import 'package:cloud_firestore/cloud_firestore.dart'; // Import Cloud Firestore
 
 class PersonalInfoPage extends StatefulWidget {
   const PersonalInfoPage({super.key});
@@ -13,69 +14,158 @@ class PersonalInfoPage extends StatefulWidget {
 
 class _PersonalInfoPageState extends State<PersonalInfoPage> {
   final _formKey = GlobalKey<FormBuilderState>();
-  final TextEditingController _nameController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
   final Logger _logger = Logger();
+  bool _isLoading = false;
 
-  String? _phone; // To store phone number from arguments
+  // Controllers for form fields
+  final TextEditingController _firstNameController = TextEditingController();
+  final TextEditingController _lastNameController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _dobController = TextEditingController(); // For Date of Birth
+  DateTime? _selectedDate; // To store selected Date of Birth
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
-    if (args != null && args.containsKey('phoneNumber')) {
-      _phone = args['phoneNumber'];
-      _logger.d('Personal Info screen received phone: $_phone');
+  void dispose() {
+    _firstNameController.dispose();
+    _lastNameController.dispose();
+    _emailController.dispose();
+    _dobController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _selectDate(BuildContext context) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate ?? DateTime.now(),
+      firstDate: DateTime(1900),
+      lastDate: DateTime.now(),
+      builder: (context, child) {
+        return Theme(
+          data: ThemeData.dark().copyWith( // Apply dark theme to date picker
+            colorScheme: const ColorScheme.dark(
+              primary: Color(0xFF007AFF), // Primary color for selected date
+              onPrimary: Colors.white,
+              surface: Color(0xFF2C2C2E), // Background of the picker
+              onSurface: Colors.white,
+            ),
+            dialogBackgroundColor: const Color(0xFF1C1C1E), // Dialog background
+          ),
+          child: child!,
+        );
+      },
+    );
+    if (picked != null && picked != _selectedDate) {
+      setState(() {
+        _selectedDate = picked;
+        _dobController.text = "${picked.toLocal()}".split(' ')[0]; // Format date as YYYY-MM-DD
+      });
+      _logger.d('Date of Birth selected: $_selectedDate');
     }
   }
 
-  // Helper function to format phone number for display (e.g., +23480... -> 080...)
-  String _formatPhoneNumberForDisplay(String? phoneNumber) {
-    if (phoneNumber == null || phoneNumber.isEmpty) {
-      return 'N/A';
+  Future<void> _savePersonalInfo() async {
+    if (_formKey.currentState?.saveAndValidate() ?? false) {
+      setState(() {
+        _isLoading = true;
+      });
+
+      final User? currentUser = FirebaseAuth.instance.currentUser;
+
+      if (currentUser == null) {
+        _logger.e('No authenticated user found to save personal info.');
+        _showMessageBox(context, 'Error: No authenticated user. Please try logging in again.');
+        setState(() {
+          _isLoading = false;
+        });
+        return;
+      }
+
+      final String uid = currentUser.uid;
+      final String firstName = _firstNameController.text.trim();
+      final String lastName = _lastNameController.text.trim();
+      final String email = _emailController.text.trim();
+      final String dob = _dobController.text.trim(); // Date of Birth as string
+
+      _logger.i('Attempting to save user info for UID: $uid');
+
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(uid).set({
+          'firstName': firstName,
+          'lastName': lastName,
+          'email': email,
+          'dateOfBirth': dob, // Store as string, or as Timestamp if preferred
+          'phoneNumber': currentUser.phoneNumber, // Store phone number from Firebase Auth
+          'accountBalance': 0.0, // Initial balance
+          'transactionPinSet': false, // Initialize transaction PIN status
+          'transactionPinHash': null, // Initialize transaction PIN hash
+          'biometricEnabled': false, // Initialize biometric status for transaction passcode
+          'loginPasscodeSet': false, // Initialize login passcode status to false
+          'loginPasscodeHash': null, // Initialize login passcode hash to null
+          'createdAt': FieldValue.serverTimestamp(), // Timestamp of creation
+        }, SetOptions(merge: true)); // Use merge: true to avoid overwriting existing fields
+
+        _logger.i('Personal info saved successfully for UID: $uid');
+
+        // Navigate to PinSetupPage for transaction PIN
+        if (!mounted) return;
+        Navigator.pushNamedAndRemoveUntil(
+          context,
+          '/pin_setup', // Navigate to PinSetupPage (for transaction PIN)
+          (route) => false, // Clear previous routes
+          arguments: {
+            'name': firstName, // Pass name for SuccessPage
+            'phoneNumber': currentUser.phoneNumber, // Pass phone number for HomeScreen
+            'initialBalance': 0.0, // Pass initial balance for HomeScreen
+          },
+        );
+      } on FirebaseException catch (e) {
+        _logger.e('Firestore Error saving personal info: ${e.message}');
+        if (!mounted) return;
+        _showMessageBox(context, 'Error saving info: ${e.message}');
+      } catch (e) {
+        _logger.e('An unexpected error occurred saving personal info: $e');
+        if (!mounted) return;
+        _showMessageBox(context, 'An unexpected error occurred. Please try again.');
+      } finally {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
-    // Check if it's a Nigerian number and format it
-    if (phoneNumber.startsWith('+234') && phoneNumber.length >= 14) {
-      // Assuming typical +23480... format, show as 080...
-      return '0${phoneNumber.substring(4)}';
-    }
-    // For other formats or non-Nigerian numbers, return as is
-    return phoneNumber;
   }
 
-  void _submitPersonalInfo() {
-    if (_formKey.currentState!.saveAndValidate() && mounted) {
-      final name = _nameController.text;
-      final email = _emailController.text;
-      _logger.d('Submitting personal info - Name: $name, Email: $email, Phone: $_phone');
-
-      // Generate a mock 6-digit OTP here, as OTP verification is the next step
-      final String mockOtp = (100000 + Random().nextInt(899999)).toString();
-      _logger.d('Mock OTP generated in PersonalInfoPage: $mockOtp');
-
-      // Navigate to the OTP verification screen, passing all collected data
-      Navigator.pushNamed(
-        context,
-        '/otp', // Navigate to OTP verification now
-        arguments: {
-          'phone': _phone, // The phone number from the first screen
-          'otp': mockOtp, // The generated OTP
-          'name': name, // Pass name
-          'email': email, // Pass email
-        },
-      );
-    }
+  void _showMessageBox(BuildContext context, String message) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: const Text('Information'),
+          content: Text(message),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('OK'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFF1C1C1E),
       appBar: AppBar(
-        title: const Text(
-          'Personal Information',
-          style: TextStyle(fontWeight: FontWeight.bold),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+          onPressed: () => Navigator.of(context).pop(),
         ),
-        centerTitle: true,
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20.0),
@@ -83,18 +173,19 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Tell us about yourself',
+              'Personal Information',
               style: TextStyle(
+                color: Colors.white,
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
               ),
             ),
             const SizedBox(height: 10),
-            Text(
-              'Please provide your full name and email address.',
+            const Text(
+              'Please provide your personal details.',
               style: TextStyle(
+                color: Colors.white70,
                 fontSize: 16,
-                color: Theme.of(context).textTheme.bodyMedium!.color,
               ),
             ),
             const SizedBox(height: 30),
@@ -103,50 +194,41 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
               autovalidateMode: AutovalidateMode.onUserInteraction,
               child: Column(
                 children: [
-                  FormBuilderTextField(
-                    name: 'name',
-                    controller: _nameController,
-                    decoration: InputDecoration(
-                      hintText: 'Full Name',
-                      filled: true,
-                      fillColor: Theme.of(context).inputDecorationTheme.fillColor,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide.none,
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide.none,
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide(color: Theme.of(context).primaryColor, width: 2.0),
-                      ),
-                      errorBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
-                      ),
-                      focusedErrorBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      hintStyle: TextStyle(color: Theme.of(context).hintColor),
-                    ),
-                    keyboardType: TextInputType.name,
+                  _buildTextField(
+                    name: 'first_name',
+                    hintText: 'First Name',
+                    controller: _firstNameController,
+                    validator: FormBuilderValidators.required(),
+                  ),
+                  const SizedBox(height: 15),
+                  _buildTextField(
+                    name: 'last_name',
+                    hintText: 'Last Name',
+                    controller: _lastNameController,
+                    validator: FormBuilderValidators.required(),
+                  ),
+                  const SizedBox(height: 15),
+                  _buildTextField(
+                    name: 'email',
+                    hintText: 'Email Address',
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
                     validator: FormBuilderValidators.compose([
                       FormBuilderValidators.required(),
-                      FormBuilderValidators.minLength(3),
+                      FormBuilderValidators.email(),
                     ]),
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 15),
+                  // Date of Birth field
                   FormBuilderTextField(
-                    name: 'email',
-                    controller: _emailController,
+                    name: 'date_of_birth',
+                    controller: _dobController,
+                    readOnly: true, // Make it read-only so user taps to select date
                     decoration: InputDecoration(
-                      hintText: 'Email Address (Optional)',
+                      hintText: 'Date of Birth (YYYY-MM-DD)',
+                      hintStyle: const TextStyle(color: Colors.white54),
                       filled: true,
-                      fillColor: Theme.of(context).inputDecorationTheme.fillColor,
+                      fillColor: const Color(0xFF2C2C2E),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12.0),
                         borderSide: BorderSide.none,
@@ -157,43 +239,17 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide(color: Theme.of(context).primaryColor, width: 2.0),
+                        borderSide: const BorderSide(color: Color(0xFF007AFF), width: 2.0),
                       ),
-                      errorBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
-                      ),
-                      focusedErrorBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12.0),
-                        borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.calendar_today, color: Colors.white54),
+                        onPressed: () => _selectDate(context),
                       ),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      hintStyle: TextStyle(color: Theme.of(context).hintColor),
                     ),
-                    keyboardType: TextInputType.emailAddress,
-                    validator: FormBuilderValidators.email(), // Email validator
-                  ),
-                  const SizedBox(height: 20),
-                  // Display phone number received from PhoneEntryPage
-                  Builder(
-                    builder: (context) {
-                      return Container(
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).inputDecorationTheme.fillColor,
-                          borderRadius: BorderRadius.circular(12.0),
-                          border: Border.all(color: Theme.of(context).dividerColor),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        child: Text(
-                          _formatPhoneNumberForDisplay(_phone), // Apply formatting here
-                          style: TextStyle(
-                            color: Theme.of(context).textTheme.bodyMedium!.color,
-                            fontSize: 16,
-                          ),
-                        ),
-                      );
-                    },
+                    style: const TextStyle(color: Colors.white),
+                    validator: FormBuilderValidators.required(),
+                    onTap: () => _selectDate(context), // Allow tapping the field to open date picker
                   ),
                 ],
               ),
@@ -201,33 +257,74 @@ class _PersonalInfoPageState extends State<PersonalInfoPage> {
             const SizedBox(height: 30),
             SizedBox(
               width: double.infinity,
-              height: 50,
               child: ElevatedButton(
-                onPressed: _submitPersonalInfo,
+                onPressed: _isLoading ? null : _savePersonalInfo,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.black,
-                  foregroundColor: Colors.white,
+                  backgroundColor: const Color(0xFF007AFF),
+                  padding: const EdgeInsets.symmetric(vertical: 15),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12.0),
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  elevation: 0,
                 ),
-                child: const Text(
-                  'Proceed',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
+                child: _isLoading
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : const Text(
+                        'Save and Continue',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
               ),
             ),
+            const SizedBox(height: 20),
           ],
         ),
       ),
     );
   }
 
-  @override
-  void dispose() {
-    _nameController.dispose();
-    _emailController.dispose();
-    super.dispose();
+  Widget _buildTextField({
+    required String name,
+    required String hintText,
+    required TextEditingController controller,
+    TextInputType keyboardType = TextInputType.text,
+    String? Function(String?)? validator,
+  }) {
+    return FormBuilderTextField(
+      name: name,
+      controller: controller,
+      decoration: InputDecoration(
+        hintText: hintText,
+        hintStyle: const TextStyle(color: Colors.white54),
+        filled: true,
+        fillColor: const Color(0xFF2C2C2E),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12.0),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12.0),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12.0),
+          borderSide: const BorderSide(color: Color(0xFF007AFF), width: 2.0),
+        ),
+        errorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12.0),
+          borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
+        ),
+        focusedErrorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12.0),
+          borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
+      keyboardType: keyboardType,
+      style: const TextStyle(color: Colors.white),
+      validator: validator,
+    );
   }
 }

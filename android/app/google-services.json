@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "141891340615",
+    "project_id": "project-wallet-87127",
+    "storage_bucket": "project-wallet-87127.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:141891340615:android:24d10fdb9348769d8ba462",
+        "android_client_info": {
+          "package_name": "com.example.flutter_application_1"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC915ChJzlmYmXzqx9H5LxQ6ws5TmQwKZI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

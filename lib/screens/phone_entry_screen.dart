@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // Required for TextInputFormatter
-import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:country_code_picker/country_code_picker.dart';
+import 'package:intl_phone_number_input/intl_phone_number_input.dart';
 import 'package:logger/logger.dart';
-import 'dart:math'; // For generating OTP
+import 'package:firebase_auth/firebase_auth.dart'; // Import Firebase Auth
+import 'package:cloud_firestore/cloud_firestore.dart'; // Import Cloud Firestore
 
 class PhoneEntryPage extends StatefulWidget {
   const PhoneEntryPage({super.key});
@@ -13,77 +13,183 @@ class PhoneEntryPage extends StatefulWidget {
 }
 
 class _PhoneEntryPageState extends State<PhoneEntryPage> {
-  final _formKey = GlobalKey<FormBuilderState>();
-  String _selectedCountryCode = '+234'; // Default to Nigeria
-  final TextEditingController _phoneController = TextEditingController();
-
+  final TextEditingController _phoneNumberController = TextEditingController();
   final Logger _logger = Logger();
+  String _selectedCountryCode = '+234';
+  bool _isLoading = false;
 
-  // Define a map for standard phone number digit limits per country code
-  final Map<String, int> _countryDigitLimits = {
-    '+234': 10, // Nigeria: 10 digits (e.g., 8060330199 for +234)
-    '+1': 10,   // USA/Canada: 10 digits
-    '+44': 10,  // UK: (mostly) 10 digits after +44
-  };
+  // Store the selected country code from intl_phone_number_input
+  String _currentCountryCode = '+234'; // Initial value
 
-  late int _maxPhoneDigits;
-
-  @override
-  void initState() {
-    super.initState();
-    _maxPhoneDigits = _countryDigitLimits[_selectedCountryCode] ?? 10;
-  }
-
-  void _onCountryCodeChanged(CountryCode countryCode) {
+  // Function to validate phone number, check existence, and send OTP
+  // The 'isLoginAttempt' flag differentiates between 'Continue' (signup/login) and 'Login' (login only)
+  Future<void> _validateAndProceed({required bool isLoginAttempt}) async {
     setState(() {
-      _selectedCountryCode = countryCode.dialCode ?? '+234';
-      _maxPhoneDigits = _countryDigitLimits[_selectedCountryCode] ?? 10;
-      _phoneController.clear(); // Clear phone number when country code changes
-      _logger.d('Country code changed to: $_selectedCountryCode, max digits: $_maxPhoneDigits');
+      _isLoading = true; // Show loading indicator while validating
     });
-  }
 
-  void _submitPhoneNumber() {
-    if (_formKey.currentState!.saveAndValidate()) {
-      final String fullPhoneNumber = _selectedCountryCode + _phoneController.text;
-      _logger.d('Submitting phone number: $fullPhoneNumber');
+    final String rawPhoneNumber = _phoneNumberController.text.trim();
+    final String fullPhoneNumber = _currentCountryCode + rawPhoneNumber;
+    _logger.i('Processing phone number: $fullPhoneNumber (isLoginAttempt: $isLoginAttempt)');
 
-      if (mounted) {
-        // Navigate to PersonalInfoPage, passing the phone number
-        Navigator.pushNamed(
-          context,
-          '/personal', // Navigate to personal info first
-          arguments: {
-            'phoneNumber': fullPhoneNumber,
-          },
-        );
+    if (rawPhoneNumber.isEmpty) {
+      _showMessageBox(context, 'Please enter your phone number.');
+      setState(() { _isLoading = false; });
+      return;
+    }
+
+    try {
+      // Step 1: Check if the phone number is already registered in Firestore
+      final usersCollection = FirebaseFirestore.instance.collection('users');
+      final querySnapshot = await usersCollection
+          .where('phoneNumber', isEqualTo: fullPhoneNumber)
+          .limit(1)
+          .get();
+
+      bool userExists = querySnapshot.docs.isNotEmpty;
+      _logger.i('User existence for $fullPhoneNumber: $userExists');
+
+      // If this is a 'Login' attempt and user does NOT exist, show error and stop.
+      if (isLoginAttempt && !userExists) {
+        _showMessageBox(context, 'This phone number is not registered. Please sign up first.');
+        setState(() { _isLoading = false; });
+        return;
       }
-    }
-  }
 
-  void _onLoginPressed() {
-    _logger.i('Login button pressed on PhoneEntryPage');
-    if (mounted) {
-      // You can navigate to a dedicated login screen if it exists
-      // For now, we'll just log or show a snackbar as a placeholder
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Login functionality not yet implemented.')),
+      // If this is a 'Continue' attempt and user DOES exist, show message and stop.
+      // This prevents existing users from accidentally going through signup flow again.
+      if (!isLoginAttempt && userExists) {
+        _showMessageBox(context, 'An account already exists with this phone number. Please use the "Login" button.');
+        setState(() { _isLoading = false; });
+        return;
+      }
+
+
+      // Step 2: Send OTP
+      await FirebaseAuth.instance.verifyPhoneNumber(
+        phoneNumber: fullPhoneNumber,
+        verificationCompleted: (PhoneAuthCredential credential) async {
+          _logger.i('Verification completed automatically: $credential');
+          // Auto-sign in the user
+          UserCredential userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+          _logger.i('User signed in via auto-verification: ${userCredential.user?.uid}');
+
+          if (mounted) {
+            if (userExists) {
+              // Existing user: go to role selection
+              Navigator.pushNamedAndRemoveUntil(
+                context,
+                '/role_selection',
+                (route) => false,
+                arguments: {
+                  'phoneNumber': fullPhoneNumber,
+                  'userExists': userExists, // Still pass userExists for OTP screen's logic
+                },
+              );
+            } else {
+              // New user: go to personal info setup
+              Navigator.pushNamedAndRemoveUntil(
+                context,
+                '/personal',
+                (route) => false,
+                arguments: {
+                  'phoneNumber': fullPhoneNumber,
+                },
+              );
+            }
+          }
+        },
+        verificationFailed: (FirebaseAuthException e) {
+          _logger.e('Phone number verification failed: ${e.message}');
+          if (mounted) {
+            _showMessageBox(context, 'Verification Failed: ${e.message}');
+          }
+          setState(() { _isLoading = false; });
+        },
+        codeSent: (String verificationId, int? resendToken) {
+          _logger.i('OTP code sent to $fullPhoneNumber. Verification ID: $verificationId');
+          if (mounted) {
+            // If it's a login attempt and user exists, navigate to RoleSelection after OTP.
+            // Otherwise, proceed to OTP verification page.
+            if (isLoginAttempt && userExists) {
+              Navigator.pushNamed(
+                context,
+                '/otp',
+                arguments: {
+                  'phoneNumber': fullPhoneNumber,
+                  'verificationId': verificationId,
+                  'userExists': userExists, // Pass user existence status
+                },
+              );
+            } else {
+              Navigator.pushNamed(
+                context,
+                '/otp',
+                arguments: {
+                  'phoneNumber': fullPhoneNumber,
+                  'verificationId': verificationId,
+                  'userExists': userExists, // Pass user existence status
+                },
+              );
+            }
+          }
+          setState(() { _isLoading = false; });
+        },
+        codeAutoRetrievalTimeout: (String verificationId) {
+          _logger.w('Code auto-retrieval timeout for ID: $verificationId');
+          setState(() { _isLoading = false; });
+        },
+        timeout: const Duration(seconds: 60), // OTP timeout
       );
+    } on FirebaseException catch (e) {
+      _logger.e('Firebase Error during phone validation/OTP sending: ${e.message}');
+      if (mounted) {
+        _showMessageBox(context, 'Firebase Error: ${e.message}');
+      }
+    } catch (e) {
+      _logger.e('An unexpected error occurred during phone validation/OTP sending: $e');
+      if (mounted) {
+        _showMessageBox(context, 'An unexpected error occurred. Please try again.');
+      }
+    } finally {
+      setState(() {
+        _isLoading = false; // Ensure loading indicator is hidden
+      });
     }
   }
 
+  // Helper function to show a message box
+  void _showMessageBox(BuildContext context, String message) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: const Text('Information'),
+          content: Text(message),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('OK'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFF1C1C1E),
       appBar: AppBar(
-        title: const Text(
-          'Create Account',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        // Removed leading back button as this is the first screen
       ),
-      body: SingleChildScrollView(
+      body: Padding(
         padding: const EdgeInsets.all(20.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -91,162 +197,113 @@ class _PhoneEntryPageState extends State<PhoneEntryPage> {
             const Text(
               'Enter your phone number',
               style: TextStyle(
+                color: Colors.white,
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
               ),
             ),
             const SizedBox(height: 10),
-            Text(
-              'We will send a verification code to this number.',
+            const Text(
+              'We will send a verification code to this number',
               style: TextStyle(
+                color: Colors.white70,
                 fontSize: 16,
-                color: Theme.of(context).textTheme.bodyMedium!.color,
               ),
             ),
             const SizedBox(height: 30),
-            FormBuilder(
-              key: _formKey,
-              autovalidateMode: AutovalidateMode.onUserInteraction,
-              child: Column(
+            Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF2C2C2E),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: InternationalPhoneNumberInput(
+                textFieldController: _phoneNumberController,
+                onInputChanged: (PhoneNumber number) {
+                  _currentCountryCode = number.dialCode!; // Update the country code
+                  _logger.d('Phone number input changed: ${number.phoneNumber}');
+                },
+                selectorConfig: const SelectorConfig(
+                  selectorType: PhoneInputSelectorType.BOTTOM_SHEET,
+                ),
+                ignoreBlank: false,
+                autoValidateMode: AutovalidateMode.disabled,
+                selectorTextStyle: const TextStyle(color: Colors.white),
+                initialValue: PhoneNumber(isoCode: 'NG'),
+                formatInput: false,
+                keyboardType: const TextInputType.numberWithOptions(signed: true, decimal: true),
+                inputBorder: InputBorder.none,
+                inputDecoration: const InputDecoration(
+                  hintText: 'Phone Number',
+                  hintStyle: TextStyle(color: Colors.white54),
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                ),
+                textStyle: const TextStyle(color: Colors.white),
+              ),
+            ),
+            const SizedBox(height: 20), // Space after the input field
+
+            // "Already have an account? Login" message
+            Align(
+              alignment: Alignment.center, // Center the row
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center, // Center items in the row
                 children: [
-                  Row(
-                    children: [
-                      CountryCodePicker(
-                        onChanged: _onCountryCodeChanged,
-                        initialSelection: 'NG', // Default to Nigeria
-                        favorite: const ['+234', 'NG'], // Favorite countries
-                        showCountryOnly: false,
-                        showOnlyCountryWhenClosed: false,
-                        alignLeft: false,
-                        flagWidth: 24, // Adjust flag size
-                        padding: EdgeInsets.zero, // Remove default padding
-                        textStyle: TextStyle(
-                          fontSize: 16,
-                          color: Theme.of(context).textTheme.bodyMedium!.color,
-                        ),
-                        dialogTextStyle: TextStyle(
-                          color: Theme.of(context).textTheme.bodyMedium!.color,
-                        ),
-                        searchStyle: TextStyle(
-                          color: Theme.of(context).textTheme.bodyMedium!.color,
-                        ),
-                        dialogBackgroundColor: Theme.of(context).scaffoldBackgroundColor, // Adapt dialog background
-                        boxDecoration: BoxDecoration(
-                          color: Theme.of(context).inputDecorationTheme.fillColor, // Adapt text field background
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Theme.of(context).dividerColor), // Adapt border color
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: FormBuilderTextField(
-                          name: 'phone_number',
-                          controller: _phoneController,
-                          decoration: InputDecoration(
-                            hintText: 'Phone number',
-                            filled: true,
-                            fillColor: Theme.of(context).inputDecorationTheme.fillColor,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.0),
-                              borderSide: BorderSide.none,
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.0),
-                              borderSide: BorderSide.none,
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.0),
-                              borderSide: BorderSide(color: Theme.of(context).primaryColor, width: 2.0),
-                            ),
-                            errorBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.0),
-                              borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
-                            ),
-                            focusedErrorBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12.0),
-                              borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2.0),
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                            hintStyle: TextStyle(color: Theme.of(context).hintColor),
-                          ),
-                          keyboardType: TextInputType.phone,
-                          inputFormatters: [
-                            FilteringTextInputFormatter.digitsOnly,
-                            LengthLimitingTextInputFormatter(_maxPhoneDigits),
-                          ],
-                          validator: (value) {
-                            if (value == null || value.isEmpty) {
-                              return 'Please enter your phone number';
-                            }
-                            // Check if the length matches the expected digits for the country
-                            if (value.length != _maxPhoneDigits) {
-                              return 'Phone number must be $_maxPhoneDigits digits long';
-                            }
-                            return null;
+                  const Text(
+                    'Already have an account?',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _isLoading
+                        ? null
+                        : () {
+                            // Call _validateAndProceed with isLoginAttempt: true for the 'Login' button
+                            _validateAndProceed(isLoginAttempt: true);
                           },
-                        ),
+                    child: const Text(
+                      'Login',
+                      style: TextStyle(
+                        color: Color(0xFF007AFF), // Blue color for the link
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
                       ),
-                    ],
+                    ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 30),
+            const Spacer(),
             SizedBox(
               width: double.infinity,
-              height: 50,
               child: ElevatedButton(
-                onPressed: _submitPhoneNumber,
+                // Call _validateAndProceed with isLoginAttempt: false for the 'Continue' button
+                onPressed: _isLoading ? null : () => _validateAndProceed(isLoginAttempt: false),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.primary,
-                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                  backgroundColor: const Color(0xFF007AFF),
+                  padding: const EdgeInsets.symmetric(vertical: 15),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12.0),
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  elevation: 0,
                 ),
-                child: const Text(
-                  'Proceed',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
+                child: _isLoading
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : const Text(
+                        'Continue',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
               ),
             ),
             const SizedBox(height: 20),
-            Align(
-              alignment: Alignment.center,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    'Already have an account? ',
-                    style: TextStyle(
-                      color: Theme.of(context).textTheme.bodyMedium!.color,
-                      fontSize: 16,
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: _onLoginPressed,
-                    child: Text(
-                      'Login',
-                      style: TextStyle(
-                        color: Theme.of(context).textTheme.bodyMedium!.color,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ],
         ),
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _phoneController.dispose();
-    super.dispose();
   }
 }

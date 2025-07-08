@@ -1,11 +1,19 @@
-
 import 'package:flutter/material.dart';
 import 'package:logger/logger.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; // Import Cloud Firestore
+import 'package:intl/intl.dart'; // Import for date formatting
+
+import 'user_profile_screen.dart'; // Import the UserProfileScreen
+import 'pay_merchant_screen.dart'; // Import PayMerchantScreen
+import 'transfer_entry_screen.dart'; // NEW: Import TransferEntryScreen
+import 'all_transactions_screen.dart'; // NEW: Import AllTransactionsScreen
+import 'dart:async'; // Import for StreamSubscription
 
 class HomeScreen extends StatefulWidget {
-  final String phoneNumber;
-  final double initialBalance;
+  final String phoneNumber; // This will be the initial phone number from auth
+  final double initialBalance; // This will be the initial balance (fallback)
 
   const HomeScreen({
     super.key,
@@ -21,45 +29,31 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   final Logger _logger = Logger();
   bool _isBalanceVisible = false;
   bool _isMenuOpen = false;
-  
+
   late AnimationController _animationController;
   late Animation<double> _scaleAnimation;
   late Animation<double> _rotationAnimation;
 
-  late String _userAccountNumber;
-  late double _accountBalance;
+  String _userAccountNumber = 'N/A';
+  double _accountBalance = 0.0;
 
-  final List<Map<String, dynamic>> _recentTransactions = [];
+  String _userFirstName = 'User';
+  String _userLastName = '';
 
-  // Added for Bottom Navigation Bar
-  int _selectedIndex = 0; // Index of the selected tab
+  List<Map<String, dynamic>> _recentTransactions = []; // List to hold fetched transactions
+
+  int _selectedIndex = 0;
+
+  // StreamSubscriptions for real-time balance and transactions
+  StreamSubscription<DocumentSnapshot>? _userBalanceSubscription;
+  StreamSubscription<QuerySnapshot>? _sentTransactionsSubscription; // Separate listener for sent
+  StreamSubscription<QuerySnapshot>? _receivedTransactionsSubscription; // Separate listener for received
 
   @override
   void initState() {
     super.initState();
-    String rawPhoneNumber = widget.phoneNumber;
-
-    // Process the phone number to be used as account number
-    if (rawPhoneNumber.startsWith('+234')) {
-      if (rawPhoneNumber.length > 4 && rawPhoneNumber[4] == '0') {
-        _userAccountNumber = rawPhoneNumber.substring(5);
-      } else {
-        _userAccountNumber = rawPhoneNumber.substring(4);
-      }
-    } else if (rawPhoneNumber.startsWith('0') && rawPhoneNumber.length >= 10) {
-      _userAccountNumber = rawPhoneNumber.substring(1);
-    } else {
-      _userAccountNumber = rawPhoneNumber;
-    }
-
-    _userAccountNumber = _userAccountNumber.replaceAll(RegExp(r'[^\d]'), '');
-
-    if (_userAccountNumber.length > 10) {
-      _userAccountNumber = _userAccountNumber.substring(_userAccountNumber.length - 10);
-    }
-
-    _accountBalance = widget.initialBalance;
-    _logger.d('HomeScreen initialized for account number: $_userAccountNumber, balance: $_accountBalance');
+    _fetchUserProfileAndBalance(); // Fetch user profile and balance once
+    _setupBalanceAndTransactionListeners(); // Set up real-time listeners
 
     // Initialize animations
     _animationController = AnimationController(
@@ -74,8 +68,227 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
+  // Fetch user profile and balance (one-time fetch as requested)
+  Future<void> _fetchUserProfileAndBalance() async {
+    final User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      _logger.w('No current user found on HomeScreen. Cannot fetch user data.');
+      if (mounted) {
+        setState(() {
+          _userAccountNumber = _formatPhoneNumberForDisplay(widget.phoneNumber);
+          _userFirstName = 'User';
+          _userLastName = '';
+          _accountBalance = widget.initialBalance;
+        });
+      }
+      return;
+    }
+
+    try {
+      DocumentSnapshot userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(currentUser.uid)
+          .get();
+
+      if (userDoc.exists && userDoc.data() != null) {
+        final userData = userDoc.data() as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            _userAccountNumber = _formatPhoneNumberForDisplay(userData['phoneNumber'] ?? 'N/A');
+            _userFirstName = userData['firstName'] ?? 'User';
+            _userLastName = userData['lastName'] ?? '';
+            _accountBalance = (userData['accountBalance'] as num?)?.toDouble() ?? 0.0;
+          });
+        }
+        _logger.i('User data fetched: Balance: $_accountBalance');
+      } else {
+        _logger.w('User document does not exist for UID: ${currentUser.uid}. Using initial data.');
+        if (mounted) {
+          setState(() {
+            _userAccountNumber = _formatPhoneNumberForDisplay(currentUser.phoneNumber ?? widget.phoneNumber);
+            _accountBalance = widget.initialBalance;
+          });
+        }
+      }
+    } on FirebaseException catch (e) {
+      _logger.e('Firestore Error fetching user data: ${e.message}');
+      if (mounted) _showMessageBox(context, 'Error loading user data: ${e.message}');
+    } catch (e) {
+      _logger.e('An unexpected error occurred fetching user data: $e');
+      if (mounted) _showMessageBox(context, 'An unexpected error occurred.');
+    }
+  }
+
+  // Set up real-time listeners for balance and transactions
+  void _setupBalanceAndTransactionListeners() {
+    final User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      _logger.w('No current user found, cannot set up Firestore listeners.');
+      return;
+    }
+    _logger.d('Setting up Firestore listeners for UID: ${currentUser.uid}');
+
+    // Listen to user's balance changes
+    _userBalanceSubscription = FirebaseFirestore.instance
+        .collection('users')
+        .doc(currentUser.uid)
+        .snapshots()
+        .listen((snapshot) {
+      if (snapshot.exists && snapshot.data() != null) {
+        final userData = snapshot.data()!;
+        if (mounted) {
+          setState(() {
+            _accountBalance = (userData['accountBalance'] as num?)?.toDouble() ?? _accountBalance;
+          });
+        }
+        _logger.d('Real-time balance update: $_accountBalance');
+      } else {
+        _logger.w('User balance document does not exist or is empty.');
+      }
+    }, onError: (error) {
+      _logger.e('Error listening to balance updates: $error');
+    });
+
+    // Listen to sent transactions
+    _sentTransactionsSubscription = FirebaseFirestore.instance
+        .collection('transactions')
+        .where('senderUid', isEqualTo: currentUser.uid)
+        .orderBy('timestamp', descending: true) // Re-added orderBy for initial fetch and sorting
+        .limit(5) // Keep limit for fetching a reasonable amount for recent display
+        .snapshots()
+        .listen((snapshot) {
+      _logger.d('Received ${snapshot.docs.length} sent transaction updates.');
+      _updateTransactions(snapshot.docs, isSender: true);
+    }, onError: (error) {
+      _logger.e('Error listening to sent transaction updates: $error');
+    });
+
+    // Listen to received transactions
+    _receivedTransactionsSubscription = FirebaseFirestore.instance
+        .collection('transactions')
+        .where('receiverUid', isEqualTo: currentUser.uid)
+        .orderBy('timestamp', descending: true) // Re-added orderBy for initial fetch and sorting
+        .limit(5) // Keep limit for fetching a reasonable amount for recent display
+        .snapshots()
+        .listen((snapshot) {
+      _logger.d('Received ${snapshot.docs.length} received transaction updates.');
+      _updateTransactions(snapshot.docs, isSender: false);
+    }, onError: (error) {
+      _logger.e('Error listening to received transaction updates: $error');
+    });
+  }
+
+  // Helper to combine and sort transactions from both listeners
+  void _updateTransactions(List<QueryDocumentSnapshot> docs, {required bool isSender}) {
+    // Create a temporary list for transactions from this specific stream (sent or received)
+    List<Map<String, dynamic>> currentStreamTransactions = [];
+
+    for (var doc in docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      _logger.d('Processing transaction doc: ${doc.id}, Data: $data');
+
+      final amount = (data['amount'] as num?)?.toDouble();
+      final timestamp = (data['timestamp'] as Timestamp?)?.toDate();
+      final description = data['description'] as String? ?? '';
+
+      if (amount == null || timestamp == null) {
+        _logger.w('Skipping transaction due to missing amount or timestamp: ${doc.id}');
+        continue; // Skip if essential data is missing
+      }
+
+      if (isSender) {
+        final receiverName = data['receiverName'] as String? ?? 'Unknown';
+        currentStreamTransactions.add({
+          'id': doc.id, // Add document ID for unique identification
+          'timestamp_raw': timestamp,
+          'icon': Icons.arrow_outward,
+          'name': 'To $receiverName',
+          'date': DateFormat('MMM dd, hh:mm a').format(timestamp),
+          'amount': '-₦${amount.toStringAsFixed(2)}',
+          'statusColor': Colors.redAccent,
+          'description': description,
+        });
+      } else {
+        final senderName = data['senderName'] as String? ?? 'Unknown';
+        currentStreamTransactions.add({
+          'id': doc.id, // Add document ID for unique identification
+          'timestamp_raw': timestamp,
+          'icon': Icons.arrow_downward,
+          'name': 'From $senderName',
+          'date': DateFormat('MMM dd, hh:mm a').format(timestamp),
+          'amount': '+₦${amount.toStringAsFixed(2)}',
+          'statusColor': Colors.green,
+          'description': description,
+        });
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        // Remove old transactions from this type (sent or received) and add new ones
+        // This ensures we always have the latest from each stream
+        _recentTransactions.removeWhere((t) =>
+            isSender ? t['icon'] == Icons.arrow_outward : t['icon'] == Icons.arrow_downward);
+        _recentTransactions.addAll(currentStreamTransactions);
+
+        // Sort all transactions by timestamp (descending)
+        _recentTransactions.sort((a, b) {
+          final DateTime dateA = a['timestamp_raw'];
+          final DateTime dateB = b['timestamp_raw'];
+          return dateB.compareTo(dateA);
+        });
+
+        // Take the top 2 most recent transactions overall for display on home screen
+        _recentTransactions = _recentTransactions.take(2).toList(); // Changed limit to 2
+      });
+      _logger.d('Final _recentTransactions list size: ${_recentTransactions.length}');
+      if (_recentTransactions.isNotEmpty) {
+        _logger.d('First transaction in list: ${_recentTransactions.first}');
+      }
+    }
+  }
+
+
+  // Helper function to format phone number for display
+  String _formatPhoneNumberForDisplay(String rawPhoneNumber) {
+    if (rawPhoneNumber.startsWith('+234')) {
+      if (rawPhoneNumber.length > 4 && rawPhoneNumber[4] == '0') {
+        return rawPhoneNumber.substring(5); // Remove +234 and leading 0
+      } else {
+        return rawPhoneNumber.substring(4); // Remove +234
+      }
+    } else if (rawPhoneNumber.startsWith('0') && rawPhoneNumber.length >= 10) {
+      return rawPhoneNumber.substring(1); // Remove leading 0
+    }
+    return rawPhoneNumber; // Return as is if no specific formatting applies
+  }
+
+  void _showMessageBox(BuildContext context, String message) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: const Text('Information'),
+          content: Text(message),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('OK'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
+    _userBalanceSubscription?.cancel();
+    _sentTransactionsSubscription?.cancel();
+    _receivedTransactionsSubscription?.cancel();
     _animationController.dispose();
     super.dispose();
   }
@@ -106,22 +319,27 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     }
   }
 
-   // Method to handle tap on a navigation bar item
   void _onItemTapped(int index) {
     setState(() {
       _selectedIndex = index;
     });
     _logger.i('Bottom navigation item tapped: $index');
-    // Here you would typically navigate to a different screen or show different content
-    // For now, we just log the selection.
-    if (index == 1) { // Assuming index 1 is for Profile
-      // We will add navigation to PersonalInfoScreen here later
-      _logger.i('Profile tab selected. Will navigate to PersonalInfoScreen soon.');
+    if (index == 3) { // Profile tab
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (context) => const UserProfileScreen()),
+      );
+      _logger.i('Profile tab selected. Navigating to UserProfileScreen.');
+    }
+    if (index == 0) { // Home tab - ensure it doesn't navigate away from itself unnecessarily
+      _fetchUserProfileAndBalance(); // Refresh balance on home tab tap
+      // No need to call _setupBalanceAndTransactionListeners here, as listeners are persistent
+    }
+    if (index == 1) {
+       _showMessageBox(context, 'Chats tab selected. Functionality not yet implemented.');
+       _logger.i('Chats tab selected. Functionality not yet implemented.');
     }
   }
-
-
-
 
   @override
   Widget build(BuildContext context) {
@@ -134,56 +352,50 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               children: [
                 // Top Bar
                 _buildTopBar(),
-                
+
                 // Balance Section
                 _buildBalanceSection(),
-                
+
                 // Quick Actions
                 _buildQuickActions(),
-                
+
                 // Recent Transactions
                 _buildRecentTransactions(),
-                
+
                 const Spacer(),
               ],
             ),
           ),
-          
+
           // Floating Menu Overlay
           if (_isMenuOpen) _buildMenuOverlay(),
-          
+
           // Floating Menu Button
           _buildFloatingMenuButton(),
         ],
       ),
-       // Added Bottom Navigation Bar
       bottomNavigationBar: BottomNavigationBar(
-        backgroundColor: const Color(0xFF2C2C2E), // Dark background for the bar
-        selectedItemColor: const Color(0xFF007AFF), // Blue for selected item
-        unselectedItemColor: Colors.white54, // Grey for unselected items
-        currentIndex: _selectedIndex, // Set the current selected index
-        onTap: _onItemTapped, // Handle tap events
+        backgroundColor: const Color(0xFF2C2C2E),
+        selectedItemColor: const Color(0xFF007AFF),
+        unselectedItemColor: Colors.white54,
+        currentIndex: _selectedIndex,
+        onTap: _onItemTapped,
         items: const <BottomNavigationBarItem>[
           BottomNavigationBarItem(
             icon: Icon(Icons.home),
             label: 'Home',
-           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.chat_bubble_outline), // Added Chat icon
-            label: 'Chat',
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.credit_card), // Added Card icon
+            icon: Icon(Icons.chat_bubble_outline),
+            label: 'Chats',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.credit_card),
             label: 'Card',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.person),
             label: 'Profile',
-          // You can add more items here if needed, e.g., 'Settings', 'History'
-          // BottomNavigationBarItem(
-          //   icon: Icon(Icons.history),
-          //   label: 'History',
-          // ),
           ),
         ],
       ),
@@ -195,9 +407,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 5),
       child: Row(
         children: [
-          const Icon(
-            Icons.person_outlined,
-            color: Colors.white54
+          // Display user's first name here
+          Text(
+            'Hi, $_userFirstName',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
           ),
           const Spacer(),
           IconButton(
@@ -211,7 +428,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
- 
   Widget _buildBalanceSection() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
@@ -236,7 +452,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                       style: const TextStyle(color: Color.fromARGB(235, 255, 255, 255)),
                     ),
                     const SizedBox(width: 8),
-                    const Icon(Icons.keyboard_arrow_down, color: Color.from(alpha: 1, red: 1, green: 1, blue: 1)),
+                    const Icon(Icons.keyboard_arrow_down, color: Color.fromARGB(255, 255, 255, 255)),
                   ],
                 ),
               ),
@@ -278,12 +494,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         children: [
           _buildQuickActionItem(Icons.phone_android, 'Airtime', () {
             _logger.i('Airtime button pressed');
+            // Navigator.pushNamed(context, '/airtime'); // Example for Airtime
           }),
           _buildQuickActionItem(Icons.send, 'Transfer', () {
             _logger.i('Transfer button pressed');
+            Navigator.pushNamed(context, '/transfer_entry'); // Navigate to new TransferEntryScreen
           }),
           _buildQuickActionItem(Icons.receipt_long, 'Bills', () {
             _logger.i('Bill button pressed');
+            // Navigator.pushNamed(context, '/bills'); // Example for Bills
           }),
         ],
       ),
@@ -299,7 +518,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             width: 50,
             height: 50,
             decoration: BoxDecoration(
-              color: const Color(0xFF2C2C2E).withValues(alpha: 1.0),
+              color: const Color(0xFF2C2C2E),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Icon(icon, color: Colors.white70, size: 22),
@@ -307,7 +526,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           const SizedBox(height: 20),
           Text(
             label,
-            style: const TextStyle(color: Colors.white70, fontSize: 13, ),
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
           ),
         ],
       ),
@@ -335,6 +554,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               TextButton(
                 onPressed: () {
                   _logger.i('See All Transactions pressed');
+                  Navigator.pushNamed(context, '/all_transactions'); // Navigate to new AllTransactionsScreen
                 },
                 child: const Text(
                   'See all',
@@ -369,7 +589,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             ListView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              itemCount: _recentTransactions.length,
+              itemCount: _recentTransactions.length, // This will now be max 2
               itemBuilder: (context, index) {
                 final transaction = _recentTransactions[index];
                 return _buildTransactionItem(
@@ -406,7 +626,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             width: 40,
             height: 40,
             decoration: BoxDecoration(
-              color: statusColor.withValues(alpha: 0.2),
+              color: statusColor.withOpacity(0.2),
               shape: BoxShape.circle,
             ),
             child: Icon(
@@ -558,7 +778,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
-
   Widget _buildFloatingMenuButton() {
     return Positioned(
       bottom: 30,
@@ -580,7 +799,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     borderRadius: BorderRadius.circular(30),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.3),
+                        color: Colors.black.withOpacity(0.3),
                         blurRadius: 10,
                         offset: const Offset(0, 5),
                       ),

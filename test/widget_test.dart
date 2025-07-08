@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:nex_pay/screens/phone_entry_screen.dart';
+import 'package:flutter_application_1/screens/phone_entry_screen.dart';
 import 'package:flutter_test/flutter_test.dart';
 //
 void main() {
