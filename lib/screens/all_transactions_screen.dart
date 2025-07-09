@@ -18,6 +18,7 @@ class _AllTransactionsScreenState extends State<AllTransactionsScreen> {
   bool _isLoading = true;
   StreamSubscription<QuerySnapshot>? _sentTransactionsSubscription;
   StreamSubscription<QuerySnapshot>? _receivedTransactionsSubscription;
+  bool _showRecentOnly = false; // Toggle for recent vs all transactions
 
   @override
   void initState() {
@@ -45,15 +46,20 @@ class _AllTransactionsScreenState extends State<AllTransactionsScreen> {
 
     _logger.d('Fetching all transactions for UID: ${currentUser.uid}');
 
+    // Cancel existing subscriptions before setting up new ones to avoid duplicates
+    _sentTransactionsSubscription?.cancel();
+    _receivedTransactionsSubscription?.cancel();
+
     // Listen to sent transactions
     _sentTransactionsSubscription = FirebaseFirestore.instance
         .collection('transactions')
         .where('senderUid', isEqualTo: currentUser.uid)
+        .where('timestamp', isGreaterThanOrEqualTo: _showRecentOnly ? Timestamp.fromDate(DateTime.now().subtract(const Duration(days: 1))) : Timestamp.fromDate(DateTime(1970)))
         .orderBy('timestamp', descending: true)
         .snapshots()
-        .listen((snapshot) {
+        .listen((snapshot) async { // Make the listener callback async
       _logger.d('Received ${snapshot.docs.length} sent transaction updates.');
-      _updateAllTransactions(snapshot.docs, isSender: true);
+      await _updateAllTransactions(snapshot.docs, isSender: true); // Await the update
     }, onError: (error) {
       _logger.e('Error listening to sent transactions: $error');
       if (mounted) {
@@ -67,12 +73,13 @@ class _AllTransactionsScreenState extends State<AllTransactionsScreen> {
     // Listen to received transactions
     _receivedTransactionsSubscription = FirebaseFirestore.instance
         .collection('transactions')
-        .where('recipientUid', isEqualTo: currentUser.uid)
+        .where('receiverUid', isEqualTo: currentUser.uid) // Corrected to receiverUid as per your previous code
+        .where('timestamp', isGreaterThanOrEqualTo: _showRecentOnly ? Timestamp.fromDate(DateTime.now().subtract(const Duration(days: 1))) : Timestamp.fromDate(DateTime(1970)))
         .orderBy('timestamp', descending: true)
         .snapshots()
-        .listen((snapshot) {
+        .listen((snapshot) async { // Make the listener callback async
       _logger.d('Received ${snapshot.docs.length} received transaction updates.');
-      _updateAllTransactions(snapshot.docs, isSender: false);
+      await _updateAllTransactions(snapshot.docs, isSender: false); // Await the update
     }, onError: (error) {
       _logger.e('Error listening to received transactions: $error');
       if (mounted) {
@@ -90,8 +97,10 @@ class _AllTransactionsScreenState extends State<AllTransactionsScreen> {
     }
   }
 
-  void _updateAllTransactions(List<QueryDocumentSnapshot> docs, {required bool isSender}) {
-    List<Map<String, dynamic>> currentStreamTransactions = [];
+  // Changed to async to allow awaiting user data fetches
+  Future<void> _updateAllTransactions(List<QueryDocumentSnapshot> docs, {required bool isSender}) async {
+    List<Map<String, dynamic>> processedTransactions = [];
+    List<Future<Map<String, dynamic>>> futures = [];
 
     for (var doc in docs) {
       final data = doc.data() as Map<String, dynamic>?;
@@ -110,72 +119,92 @@ class _AllTransactionsScreenState extends State<AllTransactionsScreen> {
       }
 
       if (isSender) {
-        final recipientName = data['recipientName'] as String? ?? 'Unknown';
-        currentStreamTransactions.add({
+        // Corrected: Use 'receiverName' for sent transactions as stored in Firestore
+        final receiverName = data['receiverName'] as String? ?? 'Unknown'; // CHANGED: from recipientName to receiverName
+        processedTransactions.add({
           'id': doc.id,
           'timestamp_raw': timestamp,
           'icon': Icons.arrow_outward,
-          'name': 'To $recipientName',
+          'name': 'To $receiverName', // CHANGED: Using receiverName
           'date': DateFormat('MMM dd, hh:mm a').format(timestamp),
           'amount': '-₦${amount.toStringAsFixed(2)}',
           'statusColor': Colors.redAccent,
           'description': description,
         });
       } else {
-        // Fetch sender's name from users collection since senderName is not stored
-        String senderName = 'Unknown';
-        final senderUid = data['senderUid'] as String?;
-        if (senderUid != null) {
-          FirebaseFirestore.instance
-              .collection('users')
-              .doc(senderUid)
-              .get()
-              .then((senderDoc) {
-            if (senderDoc.exists) {
-              final senderData = senderDoc.data() as Map<String, dynamic>?;
-              if (senderData != null) {
-                final firstName = senderData['firstName'] as String? ?? '';
-                final lastName = senderData['lastName'] as String? ?? '';
-                senderName = '$firstName $lastName'.trim();
-                if (senderName.isEmpty) senderName = 'Unknown';
-              }
-              // Update the transaction in the list
-              if (mounted) {
-                setState(() {
-                  final index = _allTransactions.indexWhere((t) => t['id'] == doc.id);
-                  if (index != -1) {
-                    _allTransactions[index]['name'] = 'From $senderName';
-                  }
-                });
-              }
-            }
-          }).catchError((error) {
-            _logger.w('Error fetching sender name for UID $senderUid: $error');
-          });
-        }
-
-        currentStreamTransactions.add({
-          'id': doc.id,
-          'timestamp_raw': timestamp,
-          'icon': Icons.arrow_downward,
-          'name': 'From $senderName',
-          'date': DateFormat('MMM dd, hh:mm a').format(timestamp),
-          'amount': '+₦${amount.toStringAsFixed(2)}',
-          'statusColor': Colors.green,
-          'description': description,
-        });
+        // For received transactions, fetch sender's name asynchronously
+        futures.add(_getSenderNameForTransaction(doc.id, data, timestamp, amount, description));
       }
+    }
+
+    // Wait for all sender name lookups to complete for received transactions
+    if (futures.isNotEmpty) {
+      final resolvedReceivedTransactions = await Future.wait(futures);
+      processedTransactions.addAll(resolvedReceivedTransactions);
     }
 
     if (mounted) {
       setState(() {
+        // Remove old transactions from this type (sent or received) and add new ones
+        // This ensures we always have the latest from each stream
         _allTransactions.removeWhere((t) =>
             isSender ? t['icon'] == Icons.arrow_outward : t['icon'] == Icons.arrow_downward);
-        _allTransactions.addAll(currentStreamTransactions);
+        _allTransactions.addAll(processedTransactions);
+
+        // Sort all transactions by timestamp (descending)
         _allTransactions.sort((a, b) => (b['timestamp_raw'] as DateTime).compareTo(a['timestamp_raw'] as DateTime));
       });
       _logger.d('Updated _allTransactions list size: ${_allTransactions.length}');
     }
+  }
+
+  // Helper function to fetch sender name for a received transaction
+  Future<Map<String, dynamic>> _getSenderNameForTransaction(
+      String docId,
+      Map<String, dynamic> data,
+      DateTime timestamp,
+      double amount,
+      String description) async {
+    String senderName = 'Unknown';
+    final senderUid = data['senderUid'] as String?;
+
+    if (senderUid != null) {
+      try {
+        DocumentSnapshot senderDoc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(senderUid)
+            .get();
+
+        if (senderDoc.exists && senderDoc.data() != null) {
+          final senderData = senderDoc.data() as Map<String, dynamic>;
+          final firstName = senderData['firstName'] as String? ?? '';
+          final lastName = senderData['lastName'] as String? ?? '';
+          senderName = '$firstName $lastName'.trim();
+          if (senderName.isEmpty) senderName = 'Unknown';
+        }
+      } catch (error) {
+        _logger.w('Error fetching sender name for UID $senderUid: $error');
+      }
+    }
+
+    return {
+      'id': docId,
+      'timestamp_raw': timestamp,
+      'icon': Icons.arrow_downward,
+      'name': 'From $senderName',
+      'date': DateFormat('MMM dd, hh:mm a').format(timestamp),
+      'amount': '+₦${amount.toStringAsFixed(2)}',
+      'statusColor': Colors.green,
+      'description': description,
+    };
+  }
+
+  void _toggleRecentTransactions() {
+    setState(() {
+      _showRecentOnly = !_showRecentOnly;
+      _allTransactions.clear(); // Clear current list to refetch
+      _fetchAllTransactions(); // Refetch with new filter
+    });
   }
 
   void _showMessageBox(BuildContext context, String message) {
@@ -266,8 +295,6 @@ class _AllTransactionsScreenState extends State<AllTransactionsScreen> {
             amount,
             style: const TextStyle(
               fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
             ),
           ),
         ],
@@ -291,6 +318,21 @@ class _AllTransactionsScreenState extends State<AllTransactionsScreen> {
           icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
           onPressed: () => Navigator.of(context).pop(),
         ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16.0),
+            child: GestureDetector(
+              onTap: _toggleRecentTransactions,
+              child: Text(
+                _showRecentOnly ? 'Show All' : 'Recent',
+                style: const TextStyle(
+                  color: Color(0xFF007AFF),
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF007AFF)))

@@ -3,6 +3,7 @@ import 'package:local_auth/local_auth.dart'; // Import local_auth for biometric 
 import 'package:firebase_auth/firebase_auth.dart'; // Import Firebase Auth
 import 'package:cloud_firestore/cloud_firestore.dart'; // Import Cloud Firestore
 import 'package:logger/logger.dart'; // Import logger
+import 'package:flutter/services.dart'; // NEW: Import for PlatformException
 
 class BiometricSettingsScreen extends StatefulWidget {
   const BiometricSettingsScreen({super.key});
@@ -17,6 +18,7 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
   bool _biometricEnabled = false;
   bool _isAuthenticating = false; // To prevent multiple authentication prompts
   bool _isLoading = true; // To show loading state while fetching initial status
+  bool _fingerprintAvailable = false; // NEW: To track if fingerprint is available
 
   @override
   void initState() {
@@ -42,6 +44,41 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
       return;
     }
 
+    // Check for available biometrics on the device
+    try {
+      bool canCheck = await _localAuth.canCheckBiometrics;
+      List<BiometricType> availableTypes = await _localAuth.getAvailableBiometrics();
+      if (mounted) {
+        setState(() {
+          _fingerprintAvailable = canCheck && availableTypes.contains(BiometricType.fingerprint);
+          if (!_fingerprintAvailable) {
+            _logger.i('Fingerprint not available on this device or not enrolled.');
+            // If fingerprint is not available, force biometricEnabled to false in UI
+            _biometricEnabled = false;
+          }
+        });
+      }
+    } on PlatformException catch (e) {
+      _logger.e('Error checking biometric availability: ${e.message}');
+      if (mounted) {
+        setState(() {
+          _fingerprintAvailable = false;
+          _biometricEnabled = false; // Disable if error occurs
+        });
+      }
+      _showMessageBox(context, 'Error checking biometric availability: ${e.message}');
+    } catch (e) {
+      _logger.e('Unexpected error checking biometric availability: $e');
+      if (mounted) {
+        setState(() {
+          _fingerprintAvailable = false;
+          _biometricEnabled = false; // Disable if error occurs
+        });
+      }
+      _showMessageBox(context, 'An unexpected error occurred checking biometrics.');
+    }
+
+
     try {
       DocumentSnapshot userDoc = await FirebaseFirestore.instance
           .collection('users')
@@ -52,11 +89,12 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
         final userData = userDoc.data() as Map<String, dynamic>;
         if (mounted) {
           setState(() {
-            _biometricEnabled = userData['biometricEnabled'] ?? false;
+            // Only set _biometricEnabled to true if fingerprint is actually available on device AND user enabled it
+            _biometricEnabled = (userData['biometricEnabled'] ?? false) && _fingerprintAvailable;
             _isLoading = false;
           });
         }
-        _logger.i('Biometric status loaded for ${currentUser.uid}: $_biometricEnabled');
+        _logger.i('Biometric status loaded for ${currentUser.uid}: $_biometricEnabled (Fingerprint available: $_fingerprintAvailable)');
       } else {
         _logger.w('User document not found for ${currentUser.uid}. Assuming biometrics are disabled.');
         if (mounted) {
@@ -105,29 +143,23 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
       return;
     }
 
+    // Ensure fingerprint is available before attempting to toggle
+    if (!_fingerprintAvailable) {
+      _showMessageBox(context, 'Fingerprint authentication is not available or not set up on this device.');
+      setState(() { _isAuthenticating = false; });
+      return;
+    }
+
     bool authenticated = false;
     try {
-      // Check if biometrics are available on the device
-      bool canCheckBiometrics = await _localAuth.canCheckBiometrics;
-      List<BiometricType> availableBiometrics = await _localAuth.getAvailableBiometrics();
-
-      if (!canCheckBiometrics || availableBiometrics.isEmpty) {
-        _logger.w('No biometrics available on device or not set up.');
-        if (mounted) {
-          _showMessageBox(context, 'Biometric authentication is not available or not set up on this device.');
-        }
-        setState(() { _isAuthenticating = false; });
-        return;
-      }
-
       // Prompt for biometric authentication to confirm the change
       authenticated = await _localAuth.authenticate(
         localizedReason: newValue
-            ? 'Please authenticate to enable biometric login'
-            : 'Please authenticate to disable biometric login',
+            ? 'Please authenticate to enable fingerprint login'
+            : 'Please authenticate to disable fingerprint login',
         options: const AuthenticationOptions(
           stickyAuth: true, // Keep authentication active after app is backgrounded
-          biometricOnly: true, // Only allow biometric authentication
+          biometricOnly: true, // Only allow biometric authentication (fingerprint in this case)
         ),
       );
 
@@ -142,7 +174,7 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
             _biometricEnabled = newValue;
             _isAuthenticating = false;
           });
-          _showMessageBox(context, newValue ? 'Biometric login enabled.' : 'Biometric login disabled.');
+          _showMessageBox(context, newValue ? 'Fingerprint login enabled.' : 'Fingerprint login disabled.');
         }
       } else {
         _logger.w('Biometric authentication failed or cancelled.');
@@ -155,6 +187,22 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
       _logger.e('Firestore Error updating biometric setting: ${e.message}');
       if (mounted) {
         _showMessageBox(context, 'Error updating setting: ${e.message}');
+      }
+      setState(() { _isAuthenticating = false; });
+    } on PlatformException catch (e) {
+      _logger.e('Platform Error during biometric authentication: ${e.code} - ${e.message}');
+      String errorMessage = 'Biometric error: ${e.message}';
+      if (e.code == 'notAvailable' || e.code == 'notEnrolled' || e.code == 'passcodeNotSet') {
+        errorMessage = 'Fingerprint not set up on device. Please enroll a fingerprint in your device settings.';
+      } else if (e.code == 'lockedOut' || e.code == 'permanentlyLockedOut') {
+        errorMessage = 'Fingerprint authentication locked. Please try again later or use an alternative login method.';
+      } else if (e.code == 'auth_error') {
+        errorMessage = 'Fingerprint authentication failed. Please try again.';
+      } else if (e.code == 'no_face_id') { // Specific check for no Face ID, though biometricOnly should handle this
+        errorMessage = 'Face ID is not available or enabled. Please use Fingerprint.';
+      }
+      if (mounted) {
+        _showMessageBox(context, errorMessage);
       }
       setState(() { _isAuthenticating = false; });
     } catch (e) {
@@ -211,7 +259,7 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Manage your biometric login preferences.',
+                    'Manage your fingerprint login preferences.', // Updated text
                     style: TextStyle(
                       fontSize: 16,
                       color: Theme.of(context).textTheme.bodyMedium?.color?.withOpacity(0.7),
@@ -226,23 +274,35 @@ class _BiometricSettingsScreenState extends State<BiometricSettingsScreen> {
                     ),
                     child: SwitchListTile(
                       title: const Text(
-                        'Enable Fingerprint/Face ID',
+                        'Enable Fingerprint', // Updated text
                         style: TextStyle(fontSize: 16, color: Colors.black87),
                       ),
                       value: _biometricEnabled,
-                      onChanged: _isAuthenticating ? null : _toggleBiometricSetting, // Disable while authenticating
+                      // Disable switch if fingerprint is not available on device
+                      onChanged: _fingerprintAvailable && !_isAuthenticating ? _toggleBiometricSetting : null,
                       activeColor: Colors.blueAccent,
                       inactiveTrackColor: Colors.grey[300],
                       secondary: Icon(Icons.fingerprint, color: Colors.grey[600], size: 28),
                     ),
                   ),
+                  if (!_fingerprintAvailable)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 10.0, left: 16.0, right: 16.0),
+                      child: Text(
+                        'Fingerprint authentication is not available or not set up on this device. Please enroll a fingerprint in your device settings to enable this feature.',
+                        style: TextStyle(
+                          color: Colors.redAccent.withOpacity(0.8),
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
                   const SizedBox(height: 20),
                   if (_isAuthenticating)
                     const Center(
                       child: Padding(
                         padding: EdgeInsets.all(8.0),
                         child: Text(
-                          'Please authenticate using your device biometrics...',
+                          'Please authenticate using your device fingerprint...', // Updated text
                           style: TextStyle(color: Colors.grey),
                         ),
                       ),

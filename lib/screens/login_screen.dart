@@ -11,9 +11,9 @@ import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:form_builder_validators/form_builder_validators.dart';
 
 class LoginPage extends StatefulWidget {
-  final String? userName;
+  final String? phoneNumber; // NEW: Added phoneNumber argument
 
-  const LoginPage({super.key, this.userName});
+  const LoginPage({super.key, this.phoneNumber}); // NEW: Constructor updated
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -28,7 +28,7 @@ class _LoginPageState extends State<LoginPage> {
   bool _biometricEnabledForUser = false;
   String? _storedLoginPasscodeHash;
   bool _isLoginPasscodeSet = false; // Tracks if login passcode is set
-  bool _isTransactionPinSet = false; // NEW: Tracks if transaction PIN is set
+  bool _isTransactionPinSet = false; // Tracks if transaction PIN is set
   String _currentUserName = 'User';
   String _currentUserUid = '';
   bool _isLoading = false;
@@ -65,7 +65,13 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void initState() {
     super.initState();
-    _checkCurrentUserAuthStatus();
+    if (widget.phoneNumber != null && widget.phoneNumber!.isNotEmpty) {
+      // Pre-fill the phone number if passed from arguments (e.g., from merchant profile)
+      _accountNumberController.text = _formatPhoneNumberForDisplay(widget.phoneNumber!);
+      _fetchUserDataByPhoneNumber(widget.phoneNumber!); // Fetch user data immediately
+    } else {
+      _checkCurrentUserAuthStatus(); // Otherwise, check for existing Firebase Auth user
+    }
   }
 
   @override
@@ -119,7 +125,7 @@ class _LoginPageState extends State<LoginPage> {
             _storedLoginPasscodeHash = userData['loginPasscodeHash'];
             _isLoginPasscodeSet = userData['loginPasscodeSet'] ?? false;
             _biometricEnabledForUser = userData['biometricEnabled'] ?? false;
-            _isTransactionPinSet = userData['transactionPinSet'] ?? false; // NEW: Fetch transaction PIN status
+            _isTransactionPinSet = userData['transactionPinSet'] ?? false;
           });
         }
         _logger.i('User data loaded for $fullPhoneNumber: Name: $_currentUserName, Login Passcode Set: $_isLoginPasscodeSet, Biometric Enabled: $_biometricEnabledForUser, Transaction PIN Set: $_isTransactionPinSet');
@@ -135,7 +141,7 @@ class _LoginPageState extends State<LoginPage> {
             _storedLoginPasscodeHash = null;
             _isLoginPasscodeSet = false;
             _biometricEnabledForUser = false;
-            _isTransactionPinSet = false; // Reset if user not found
+            _isTransactionPinSet = false;
           });
         }
       }
@@ -173,6 +179,7 @@ class _LoginPageState extends State<LoginPage> {
     });
 
     try {
+      // Ensure user data is fetched for the entered phone number
       await _fetchUserDataByPhoneNumber(fullEnteredPhoneNumber);
 
       if (_currentUserUid.isEmpty) {
@@ -183,9 +190,26 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
+      // Ensure Firebase Auth user is the same as the one we are trying to log in
       User? firebaseUser = FirebaseAuth.instance.currentUser;
       if (firebaseUser == null || firebaseUser.uid != _currentUserUid) {
-        _logger.w('Firebase Auth user mismatch or not authenticated. Proceeding with passcode verification for fetched UID.');
+        // If the Firebase Auth user is not the one associated with the entered phone number,
+        // we need to sign them in. This might involve re-verifying the phone number
+        // or using a custom token if available. For now, we'll assume the user
+        // is already authenticated via phone_entry_screen or needs to be.
+        // If a different user is logged in, sign them out first.
+        if (firebaseUser != null && firebaseUser.uid != _currentUserUid) {
+          await FirebaseAuth.instance.signOut();
+          _logger.w('Signed out previous Firebase user due to mismatch.');
+        }
+
+        // Attempt to sign in the user if not already signed in with the correct UID
+        // This is a simplified approach. In a production app, you might need
+        // to re-trigger phone verification or use a custom token flow.
+        // For this scenario, we assume the user has already gone through phone verification
+        // and their Firebase Auth session is active or can be re-established.
+        // If not, the user would need to go back through the OTP flow.
+        // For now, we'll assume a successful Firebase Auth login happened earlier.
       }
 
       if (!_isLoginPasscodeSet || _storedLoginPasscodeHash == null) {
@@ -209,7 +233,7 @@ class _LoginPageState extends State<LoginPage> {
           (route) => false,
           arguments: {
             'phoneNumber': fullEnteredPhoneNumber,
-            'initialBalance': 0.0,
+            'initialBalance': 0.0, // You might fetch actual balance here
           },
         );
       } else {
@@ -228,8 +252,16 @@ class _LoginPageState extends State<LoginPage> {
 
   // Function to handle fingerprint authentication
   Future<void> _authenticateWithBiometrics() async {
-    if (_currentUserUid.isEmpty) {
+    // Ensure an account number is entered and data is fetched
+    if (_accountNumberController.text.trim().isEmpty) {
       _showMessageBox(context, 'Please enter your account number first to enable biometric login.');
+      return;
+    }
+    final String fullEnteredPhoneNumber = '+234${_accountNumberController.text.trim()}';
+    await _fetchUserDataByPhoneNumber(fullEnteredPhoneNumber); // Fetch data based on entered number
+
+    if (_currentUserUid.isEmpty) {
+      _showMessageBox(context, 'No user account found for this number.');
       return;
     }
     if (!_biometricEnabledForUser) {
@@ -249,6 +281,20 @@ class _LoginPageState extends State<LoginPage> {
       return;
     }
 
+    BiometricType? preferredBiometric;
+    if (availableBiometrics.contains(BiometricType.fingerprint)) {
+      preferredBiometric = BiometricType.fingerprint;
+    } else if (availableBiometrics.contains(BiometricType.face)) {
+      preferredBiometric = BiometricType.face;
+    } else if (availableBiometrics.isNotEmpty) {
+      preferredBiometric = availableBiometrics.first;
+    }
+
+    if (preferredBiometric == null) {
+      _showMessageBox(context, 'No suitable biometric authentication method found on this device.');
+      return;
+    }
+
     if (mounted) {
       showDialog(
         context: context,
@@ -256,7 +302,7 @@ class _LoginPageState extends State<LoginPage> {
         builder: (context) => AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
           title: const Text('Biometric Authentication'),
-          content: const Text('Please authenticate using your device biometrics to log in.'),
+          content: Text('Please authenticate using your device ${preferredBiometric == BiometricType.fingerprint ? 'fingerprint' : preferredBiometric == BiometricType.face ? 'Face ID' : 'biometrics'} to log in.'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
@@ -269,21 +315,21 @@ class _LoginPageState extends State<LoginPage> {
 
     try {
       bool authenticated = await _localAuth.authenticate(
-        localizedReason: 'Scan your biometrics to log in',
+        localizedReason: 'Scan your ${preferredBiometric == BiometricType.fingerprint ? 'fingerprint' : preferredBiometric == BiometricType.face ? 'Face ID' : 'biometrics'} to log in',
         options: const AuthenticationOptions(biometricOnly: true),
       );
       if (mounted) {
         Navigator.pop(context);
         if (authenticated) {
           _showMessageBox(context, 'Biometric authentication successful!');
-          await _saveLastLoggedInPhoneNumber('+234${_accountNumberController.text.trim()}');
+          await _saveLastLoggedInPhoneNumber(fullEnteredPhoneNumber);
 
           Navigator.pushNamedAndRemoveUntil(
             context,
             '/home',
             (route) => false,
             arguments: {
-              'phoneNumber': '+234${_accountNumberController.text.trim()}',
+              'phoneNumber': fullEnteredPhoneNumber,
               'initialBalance': 0.0,
             },
           );
@@ -328,10 +374,11 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   // Clear the last logged-in phone number from local storage
-  Future<void> _clearLastLoggedInPhoneNumber() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('lastLoggedInPhoneNumber');
-  }
+  // Not used in this context, but kept for completeness
+  // Future<void> _clearLastLoggedInPhoneNumber() async {
+  //   final prefs = await SharedPreferences.getInstance();
+  //   await prefs.remove('lastLoggedInPhoneNumber');
+  // }
 
   // Helper function to format phone number for display (e.g., remove country code prefix)
   String _formatPhoneNumberForDisplay(String rawPhoneNumber) {
@@ -451,7 +498,7 @@ class _LoginPageState extends State<LoginPage> {
                           _storedLoginPasscodeHash = null;
                           _isLoginPasscodeSet = false;
                           _biometricEnabledForUser = false;
-                          _isTransactionPinSet = false; // Reset if phone number incomplete
+                          _isTransactionPinSet = false;
                         });
                       }
                     },
@@ -545,13 +592,21 @@ class _LoginPageState extends State<LoginPage> {
 
             // "Click to log in with Fingerprint"
             Center(
-              child: TextButton(
+              child: ElevatedButton.icon(
                 onPressed: _authenticateWithBiometrics,
-                child: const Text(
-                  'Click to log in with Fingerprint',
+                icon: const Icon(Icons.fingerprint, color: Colors.white),
+                label: const Text(
+                  'Login with Fingerprint',
                   style: TextStyle(
-                    color: Color(0xFF00C853),
+                    color: Colors.white,
                     fontSize: 16,
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00C853),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
                   ),
                 ),
               ),

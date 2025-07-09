@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart'; // Import Firebase Core
 import 'package:firebase_auth/firebase_auth.dart'; // Import Firebase Auth
+import 'package:flutter_application_1/screens/qr_code_scanner_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart'; // Import for local storage
-
 import 'screens/phone_entry_screen.dart';
 import 'screens/otp_verification_screen.dart';
 import 'screens/personal_info_screen.dart';
@@ -23,6 +23,10 @@ import 'screens/all_transactions_screen.dart'; // NEW: Import AllTransactionsScr
 import 'screens/login_passcode_screen.dart'; // Corrected import for 6-digit login passcode management
 import 'screens/role_selection_screen.dart'; // Import RoleSelectionScreen
 import 'screens/merchant_login_screen.dart'; // Import MerchantLoginPage
+import 'screens/qr_generator_screen.dart'; // NEW: Import QrGeneratorScreen
+import 'screens/merchant_signup_screen.dart'; // NEW: Import MerchantSignupScreen
+import 'screens/merchant_home_screen.dart'; // NEW: Import MerchantHomeScreen
+import 'screens/merchant_profile_screen.dart'; // NEW: Import MerchantProfileScreen
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -41,7 +45,7 @@ class Wallet extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      initialRoute: '/phone', // Starting point: PhoneEntryPage
+      initialRoute: '/role_selection', // Starting point: RoleSelectionScreen
       routes: {
         '/phone': (context) => const PhoneEntryPage(),
         '/otp': (context) {
@@ -65,8 +69,21 @@ class Wallet extends StatelessWidget {
           );
         },
         '/profile': (context) => const UserProfileScreen(),
-        '/login': (context) => const LoginPage(), // User Login Page (6-digit login passcode)
+        '/login': (context) {
+          final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+          return LoginPage(
+            phoneNumber: args?['phoneNumber'] as String?, // Pass phone number to login screen
+          );
+        },
         '/merchant_login': (context) => const MerchantLoginPage(), // Merchant Login Page
+        '/merchant_signup': (context) => const MerchantSignupScreen(), // NEW: Route for MerchantSignupScreen
+        '/merchant_home': (context) { // NEW: Route for MerchantHomeScreen
+          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>;
+          return MerchantHomeScreen(
+            merchantId: args['merchantId'],
+          );
+        },
+        '/merchant_profile': (context) => const MerchantProfileScreen(), // NEW: Route for MerchantProfileScreen
         '/biometric_settings': (context) => const BiometricSettingsScreen(),
         '/account_settings': (context) => const AccountSettingsScreen(),
         //'/pay_merchant': (context) => const PayMerchantScreen(), // Assuming this exists or will be created
@@ -111,11 +128,11 @@ class Wallet extends StatelessWidget {
             bankName: args['bankName'],
           );
         },
-        '/all_transactions': (context) => const AllTransactionsScreen(), // NEW: Route for AllTransactionsScreen
+        '/all_transactions': (context) => const AllTransactionsScreen(),
+        '/qr_scanner': (context) => const QrScannerScreen(), // NEW: Route for QrScannerScreen
+        '/qr_generator': (context) => const QrGeneratorScreen(), // NEW: Route for QrGeneratorScreen
         '/login_passcode': (context) => const LoginPasscodeScreen(), // Route for 6-digit login passcode management
         '/role_selection': (context) => RoleSelectionScreen(), // Role Selection Screen
-        // You might want to add a '/merchant_home' route here for successful merchant login
-        // '/merchant_home': (context) => const MerchantHomeScreen(), // Example
       },
       theme: ThemeData.light(),
       darkTheme: ThemeData.dark(),

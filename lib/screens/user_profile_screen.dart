@@ -21,6 +21,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   String _userPhoneNumber = 'N/A'; // Will display the phone number as account number
   String _profileImageUrl = 'https://placehold.co/150x150/aabbcc/ffffff?text=User'; // Default placeholder
   bool _isLoginPasscodeSet = false; // To track if login passcode is set
+  bool _hasMerchantAccount = false; // NEW: To track if user has a linked merchant account
 
   @override
   void initState() {
@@ -51,21 +52,37 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             });
           }
           _logger.i('User profile data fetched: $_userName, $_userEmail, $_userPhoneNumber, Login Passcode Set: $_isLoginPasscodeSet');
+
+          // NEW: Check for linked merchant account
+          final merchantQuery = await FirebaseFirestore.instance
+              .collection('merchants')
+              .where('userUid', isEqualTo: currentUser.uid)
+              .limit(1)
+              .get();
+
+          if (mounted) {
+            setState(() {
+              _hasMerchantAccount = merchantQuery.docs.isNotEmpty;
+            });
+          }
+          _logger.i('User has linked merchant account: $_hasMerchantAccount');
+
         } else {
-          _logger.w('User document not found for UID: ${currentUser.uid}. Assuming no login passcode set.');
+          _logger.w('User document not found for UID: ${currentUser.uid}. Assuming no login passcode set and no merchant account.');
           if (mounted) {
             setState(() {
               _userPhoneNumber = _formatPhoneNumberForDisplay(currentUser.phoneNumber ?? 'N/A'); // Fallback to auth phone
               _isLoginPasscodeSet = false; // Default to false if document not found
+              _hasMerchantAccount = false;
             });
           }
         }
       } on FirebaseException catch (e) {
         _logger.e('Firestore Error fetching user profile: ${e.message}');
-        if (mounted) _showMessageBox(context, 'Error loading profile: ${e.message}');
+        if (mounted) _showMessageBox(context, 'Error loading profile: ${e.message}', 'Please try again later.');
       } catch (e) {
         _logger.e('An unexpected error fetching user profile: $e');
-        if (mounted) _showMessageBox(context, 'An unexpected error occurred. Please try again.');
+        if (mounted) _showMessageBox(context, 'An unexpected error occurred.', 'Please try again.');
       }
     } else {
       _logger.w('No current user found for profile screen.');
@@ -87,13 +104,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   }
 
   // Helper function to show a message box (instead of alert)
-  void _showMessageBox(BuildContext context, String message) {
+  void _showMessageBox(BuildContext context, String title, String message) {
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          title: const Text('Information'),
+          title: Text(title),
           content: Text(message),
           actions: <Widget>[
             TextButton(
@@ -131,12 +148,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
   // Function to handle user logout with passcode check
   Future<void> _logout(BuildContext context) async {
-    // Check if login passcode is set before allowing logout
-    if (!_isLoginPasscodeSet) {
-      _showMessageBox(context, 'Please set up your Login Passcode in Account Settings before logging out to ensure account security.');
-      return; // Prevent logout
-    }
-
     // Show confirmation dialog before logging out
     bool? confirmLogout = await showDialog<bool>(
       context: context,
@@ -178,11 +189,63 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       } catch (e) {
         debugPrint('Error during logout: $e');
         if (context.mounted) {
-          _showMessageBox(context, 'Error logging out. Please try again.');
+          _showMessageBox(context, 'Error logging out.', 'Please try again.');
         }
       }
     }
   }
+
+  // NEW: Function to switch to merchant login
+  Future<void> _switchToMerchantLogin(BuildContext context) async {
+    final User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      _showMessageBox(context, 'Error', 'No authenticated user found. Please log in as a user first.');
+      return;
+    }
+
+    // Check if a merchant account is linked to this user's UID
+    try {
+      DocumentSnapshot merchantDoc = await FirebaseFirestore.instance
+          .collection('merchants')
+          .doc(currentUser.uid)
+          .get();
+
+      if (merchantDoc.exists && merchantDoc.data() != null) {
+        final merchantData = merchantDoc.data() as Map<String, dynamic>;
+        final String merchantId = merchantData['merchantId'] ?? '';
+
+        if (merchantId.isNotEmpty) {
+          // Save the merchantId to SharedPreferences for the merchant login screen to pick up
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('lastLoggedInMerchantId', merchantId);
+
+          _logger.i('Switching to merchant login with ID: $merchantId');
+          if (context.mounted) {
+            Navigator.pushNamedAndRemoveUntil(
+              context,
+              '/merchant_login', // Navigate to the merchant login page
+              (route) => false, // Clear all previous routes
+            );
+          }
+        } else {
+          _showMessageBox(context, 'Error', 'Linked merchant account found but Merchant ID is missing.');
+        }
+      } else {
+        _showMessageBox(context, 'No Merchant Account', 'You do not have a merchant account linked to your user profile. Please create one first.');
+        // Optionally navigate to merchant signup if desired:
+        // if (context.mounted) {
+        //   Navigator.pushNamed(context, '/merchant_signup');
+        // }
+      }
+    } on FirebaseException catch (e) {
+      _logger.e('Firestore Error checking merchant account: ${e.message}');
+      if (mounted) _showMessageBox(context, 'Error', 'Failed to check merchant account: ${e.message}');
+    } catch (e) {
+      _logger.e('An unexpected error occurred checking merchant account: $e');
+      if (mounted) _showMessageBox(context, 'Error', 'An unexpected error occurred. Please try again.');
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -224,7 +287,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     bottom: 0,
                     child: GestureDetector(
                       onTap: () {
-                        _showMessageBox(context, 'Edit Profile Picture clicked!');
+                        _showMessageBox(context, 'Edit Profile Picture', 'Edit Profile Picture clicked!');
                       },
                       child: CircleAvatar(
                         radius: screenSize.width * 0.04, // Responsive edit icon size
@@ -262,7 +325,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               // Edit Profile Button
               ElevatedButton(
                 onPressed: () {
-                  _showMessageBox(context, 'Edit Profile clicked!');
+                  _showMessageBox(context, 'Edit Profile', 'Edit Profile clicked!');
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.blueAccent,
@@ -313,33 +376,63 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 context,
                 icon: Icons.people_alt,
                 title: 'Privacy',
-                onTap: () => _showMessageBox(context, 'Privacy clicked!'),
+                onTap: () => _showMessageBox(context, 'Privacy', 'Privacy clicked!'),
               ),
               _buildSettingsTile(
                 context,
                 icon: Icons.handshake,
                 title: 'Partners & Services',
-                onTap: () => _showMessageBox(context, 'Partners & Services clicked!'),
+                onTap: () => _showMessageBox(context, 'Partners & Services', 'Partners & Services clicked!'),
               ),
               _buildSettingsTile(
                 context,
                 icon: Icons.history,
                 title: 'Login Activity',
-                onTap: () => _showMessageBox(context, 'Login Activity clicked!'),
+                onTap: () => _showMessageBox(context, 'Login Activity', 'Login Activity clicked!'),
               ),
               _buildSettingsTile(
                 context,
                 icon: Icons.document_scanner,
                 title: 'Documents',
-                onTap: () => _showMessageBox(context, 'Documents clicked!'),
+                onTap: () => _showMessageBox(context, 'Documents', 'Documents clicked!'),
               ),
               _buildSettingsTile(
                 context,
                 icon: Icons.store,
                 title: 'Store',
-                onTap: () => _showMessageBox(context, 'Store clicked!'),
+                onTap: () => _showMessageBox(context, 'Store', 'Store clicked!'),
               ),
               SizedBox(height: screenSize.height * 0.04),
+
+              // NEW: Switch to Merchant Button (conditionally displayed)
+              if (_hasMerchantAccount)
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () => _switchToMerchantLogin(context),
+                    icon: const Icon(Icons.storefront, color: Colors.white),
+                    label: const Text(
+                      'Switch to Merchant Account',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF00C853), // Green accent
+                      padding: EdgeInsets.symmetric(
+                        horizontal: screenSize.width * 0.05,
+                        vertical: screenSize.height * 0.015,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 5,
+                    ),
+                  ),
+                ),
+              SizedBox(height: _hasMerchantAccount ? screenSize.height * 0.02 : 0), // Add spacing only if button is visible
 
               // Logout Button at the bottom left
               Align(

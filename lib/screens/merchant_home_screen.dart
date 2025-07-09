@@ -5,184 +5,168 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart'; // Import Cloud Firestore
 import 'package:intl/intl.dart'; // Import for date formatting
 
-import 'user_profile_screen.dart'; // Import the UserProfileScreen
-import 'pay_merchant_screen.dart'; // Import PayMerchantScreen
-import 'transfer_entry_screen.dart'; // NEW: Import TransferEntryScreen
-import 'all_transactions_screen.dart'; // NEW: Import AllTransactionsScreen
-import 'qr_code_scanner_screen.dart'; // NEW: Import QrScannerScreen
-import 'qr_generator_screen.dart'; // NEW: Import QrGeneratorScreen
+// Import screens relevant to merchant actions
+import 'merchant_profile_screen.dart'; // NEW: Import the MerchantProfileScreen (will create next)
+import 'transfer_entry_screen.dart';
+import 'qr_code_scanner_screen.dart'; // For 'Receive' quick action
+import 'qr_generator_screen.dart'; // For 'My QR Code' quick action
+import 'all_transactions_screen.dart'; // For 'See all' transactions
 import 'dart:async'; // Import for StreamSubscription
 
-class HomeScreen extends StatefulWidget {
-  final String phoneNumber; // This will be the initial phone number from auth
-  final double initialBalance; // This will be the initial balance (fallback)
+class MerchantHomeScreen extends StatefulWidget {
+  final String merchantId; // This will be the initial merchant ID from login
 
-  const HomeScreen({
+  const MerchantHomeScreen({
     super.key,
-    required this.phoneNumber,
-    required this.initialBalance,
+    required this.merchantId,
   });
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<MerchantHomeScreen> createState() => _MerchantHomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
+class _MerchantHomeScreenState extends State<MerchantHomeScreen> with TickerProviderStateMixin {
   final Logger _logger = Logger();
   bool _isBalanceVisible = false;
-  bool _isMenuOpen = false;
 
-  late AnimationController _animationController;
-  late Animation<double> _scaleAnimation;
-  late Animation<double> _rotationAnimation;
+  // Removed _isMenuOpen and animation controllers as the floating menu is removed
 
-  String _userAccountNumber = 'N/A';
+  String _merchantAccountNumber = 'N/A'; // Will display merchant's phone number or a unique merchant account identifier
   double _accountBalance = 0.0;
 
-  String _userFirstName = 'User';
-  String _userLastName = '';
+  String _merchantName = 'Merchant'; // Will display the fetched merchant name
 
   List<Map<String, dynamic>> _recentTransactions = []; // List to hold fetched transactions
 
-  int _selectedIndex = 0;
+  int _selectedIndex = 0; // For bottom navigation bar
 
   // StreamSubscriptions for real-time balance and transactions
-  StreamSubscription<DocumentSnapshot>? _userBalanceSubscription;
-  StreamSubscription<QuerySnapshot>? _sentTransactionsSubscription; // Separate listener for sent
-  StreamSubscription<QuerySnapshot>? _receivedTransactionsSubscription; // Separate listener for received
+  StreamSubscription<DocumentSnapshot>? _merchantBalanceSubscription;
+  StreamSubscription<QuerySnapshot>? _sentTransactionsSubscription;
+  StreamSubscription<QuerySnapshot>? _receivedTransactionsSubscription;
 
   @override
   void initState() {
     super.initState();
-    _fetchUserProfileAndBalance(); // Fetch user profile and balance once
+    _fetchMerchantProfileAndBalance(); // Fetch merchant profile and balance once
     _setupBalanceAndTransactionListeners(); // Set up real-time listeners
-
-    // Initialize animations
-    _animationController = AnimationController(
-      duration: const Duration(milliseconds: 300),
-      vsync: this,
-    );
-    _scaleAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.elasticOut),
-    );
-    _rotationAnimation = Tween<double>(begin: 0.0, end: 0.250).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
-    );
   }
 
-  // Fetch user profile and balance (one-time fetch as requested)
-  Future<void> _fetchUserProfileAndBalance() async {
-    final User? currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) {
-      _logger.w('No current user found on HomeScreen. Cannot fetch user data.');
-      if (mounted) {
-        setState(() {
-          _userAccountNumber = _formatPhoneNumberForDisplay(widget.phoneNumber);
-          _userFirstName = 'User';
-          _userLastName = '';
-          _accountBalance = widget.initialBalance;
-        });
-      }
-      return;
-    }
+  // Fetch merchant profile and balance (one-time fetch)
+  Future<void> _fetchMerchantProfileAndBalance() async {
+    // For merchant home, we need the merchant's UID to fetch their document.
+    // Assuming the merchantId passed here is the actual Firestore document ID
+    // or can be used to query the merchant document to get the UID.
+    // For simplicity, let's assume `widget.merchantId` is the Firestore document ID for now.
+    // In a more complex scenario, you might have a Firebase Auth UID for the merchant.
 
     try {
-      DocumentSnapshot userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(currentUser.uid)
+      // Query the 'merchants' collection by 'merchantId' field
+      QuerySnapshot merchantQuery = await FirebaseFirestore.instance
+          .collection('merchants')
+          .where('merchantId', isEqualTo: widget.merchantId)
+          .limit(1)
           .get();
 
-      if (userDoc.exists && userDoc.data() != null) {
-        final userData = userDoc.data() as Map<String, dynamic>;
+      if (merchantQuery.docs.isNotEmpty) {
+        DocumentSnapshot merchantDoc = merchantQuery.docs.first;
+        final merchantData = merchantDoc.data() as Map<String, dynamic>;
         if (mounted) {
           setState(() {
-            _userAccountNumber = _formatPhoneNumberForDisplay(userData['phoneNumber'] ?? 'N/A');
-            _userFirstName = userData['firstName'] ?? 'User';
-            _userLastName = userData['lastName'] ?? '';
-            _accountBalance = (userData['accountBalance'] as num?)?.toDouble() ?? 0.0;
+            _merchantName = merchantData['merchantName'] ?? 'Merchant';
+            _merchantAccountNumber = _formatPhoneNumberForDisplay(merchantData['phoneNumber'] ?? 'N/A'); // Assuming merchants also have a phone number
+            _accountBalance = (merchantData['accountBalance'] as num?)?.toDouble() ?? 0.0;
           });
         }
-        _logger.i('User data fetched: Balance: $_accountBalance');
+        _logger.i('Merchant data fetched: Name: $_merchantName, Balance: $_accountBalance');
       } else {
-        _logger.w('User document does not exist for UID: ${currentUser.uid}. Using initial data.');
+        _logger.w('Merchant document not found for ID: ${widget.merchantId}. Using initial data.');
         if (mounted) {
           setState(() {
-            _userAccountNumber = _formatPhoneNumberForDisplay(currentUser.phoneNumber ?? widget.phoneNumber);
-            _accountBalance = widget.initialBalance;
+            _merchantAccountNumber = 'N/A'; // Default if not found
+            _accountBalance = 0.0; // Default if not found
           });
         }
       }
     } on FirebaseException catch (e) {
-      _logger.e('Firestore Error fetching user data: ${e.message}');
-      if (mounted) _showMessageBox(context, 'Error loading user data: ${e.message}');
+      _logger.e('Firestore Error fetching merchant data: ${e.message}');
+      if (mounted) _showMessageBox(context, 'Error loading merchant data: ${e.message}');
     } catch (e) {
-      _logger.e('An unexpected error occurred fetching user data: $e');
+      _logger.e('An unexpected error occurred fetching merchant data: $e');
       if (mounted) _showMessageBox(context, 'An unexpected error occurred.');
     }
   }
 
   // Set up real-time listeners for balance and transactions
   void _setupBalanceAndTransactionListeners() {
-    final User? currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) {
-      _logger.w('No current user found, cannot set up Firestore listeners.');
-      return;
-    }
-    _logger.d('Setting up Firestore listeners for UID: ${currentUser.uid}');
+    // This part is tricky. If merchants have their own Firebase Auth UIDs,
+    // you'd use FirebaseAuth.instance.currentUser.uid.
+    // If not, you'd need to use the Firestore document ID of the merchant
+    // that corresponds to widget.merchantId.
+    // For now, I'll assume the merchant's document ID is available or can be derived.
+    // Let's assume for simplicity that the merchant's document ID in 'merchants' collection
+    // is the same as their 'merchantId' field for transaction tracking.
+    // In a real app, you'd likely map the merchantId to a Firebase Auth UID.
 
-    // Listen to user's balance changes
-    _userBalanceSubscription = FirebaseFirestore.instance
-        .collection('users')
-        .doc(currentUser.uid)
+    // To simplify, let's use the merchantId as the UID for transaction filtering
+    // This is a simplification and might need adjustment based on your actual
+    // merchant authentication and data structure.
+    final String currentMerchantUidForTransactions = widget.merchantId; // Using merchantId as a pseudo-UID for transactions
+
+    // Listen to merchant's balance changes
+    // This assumes the merchant's balance is stored in their merchant document
+    _merchantBalanceSubscription = FirebaseFirestore.instance
+        .collection('merchants')
+        .doc(currentMerchantUidForTransactions) // Assuming merchantId is the doc ID for balance
         .snapshots()
         .listen((snapshot) {
       if (snapshot.exists && snapshot.data() != null) {
-        final userData = snapshot.data()!;
+        final merchantData = snapshot.data()!;
         if (mounted) {
           setState(() {
-            _accountBalance = (userData['accountBalance'] as num?)?.toDouble() ?? _accountBalance;
+            _accountBalance = (merchantData['accountBalance'] as num?)?.toDouble() ?? _accountBalance;
           });
         }
-        _logger.d('Real-time balance update: $_accountBalance');
+        _logger.d('Real-time merchant balance update: $_accountBalance');
       } else {
-        _logger.w('User balance document does not exist or is empty.');
+        _logger.w('Merchant balance document does not exist or is empty for UID: $currentMerchantUidForTransactions.');
       }
     }, onError: (error) {
-      _logger.e('Error listening to balance updates: $error');
+      _logger.e('Error listening to merchant balance updates: $error');
     });
 
-    // Listen to sent transactions
+    // Listen to sent transactions by this merchant
     _sentTransactionsSubscription = FirebaseFirestore.instance
         .collection('transactions')
-        .where('senderUid', isEqualTo: currentUser.uid)
-        .orderBy('timestamp', descending: true) // Re-added orderBy for initial fetch and sorting
-        .limit(5) // Keep limit for fetching a reasonable amount for recent display
+        .where('senderUid', isEqualTo: currentMerchantUidForTransactions)
+        .orderBy('timestamp', descending: true)
+        .limit(5)
         .snapshots()
         .listen((snapshot) {
-      _logger.d('Received ${snapshot.docs.length} sent transaction updates.');
+      _logger.d('Received ${snapshot.docs.length} sent transaction updates for merchant.');
       _updateTransactions(snapshot.docs, isSender: true);
     }, onError: (error) {
-      _logger.e('Error listening to sent transaction updates: $error');
+      _logger.e('Error listening to sent transaction updates for merchant: $error');
     });
 
-    // Listen to received transactions
+    // Listen to received transactions by this merchant
     _receivedTransactionsSubscription = FirebaseFirestore.instance
         .collection('transactions')
-        .where('receiverUid', isEqualTo: currentUser.uid)
-        .orderBy('timestamp', descending: true) // Re-added orderBy for initial fetch and sorting
-        .limit(5) // Keep limit for fetching a reasonable amount for recent display
+        .where('receiverUid', isEqualTo: currentMerchantUidForTransactions)
+        .orderBy('timestamp', descending: true)
+        .limit(5)
         .snapshots()
         .listen((snapshot) {
-      _logger.d('Received ${snapshot.docs.length} received transaction updates.');
+      _logger.d('Received ${snapshot.docs.length} received transaction updates for merchant.');
       _updateTransactions(snapshot.docs, isSender: false);
     }, onError: (error) {
-      _logger.e('Error listening to received transaction updates: $error');
+      _logger.e('Error listening to received transaction updates for merchant: $error');
     });
   }
 
+
   // Helper to combine and sort transactions from both listeners
   void _updateTransactions(List<QueryDocumentSnapshot> docs, {required bool isSender}) {
-    // Create a temporary list for transactions from this specific stream (sent or received)
     List<Map<String, dynamic>> currentStreamTransactions = [];
 
     for (var doc in docs) {
@@ -195,13 +179,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
       if (amount == null || timestamp == null) {
         _logger.w('Skipping transaction due to missing amount or timestamp: ${doc.id}');
-        continue; // Skip if essential data is missing
+        continue;
       }
 
       if (isSender) {
         final receiverName = data['receiverName'] as String? ?? 'Unknown';
         currentStreamTransactions.add({
-          'id': doc.id, // Add document ID for unique identification
+          'id': doc.id,
           'timestamp_raw': timestamp,
           'icon': Icons.arrow_outward,
           'name': 'To $receiverName',
@@ -213,7 +197,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       } else {
         final senderName = data['senderName'] as String? ?? 'Unknown';
         currentStreamTransactions.add({
-          'id': doc.id, // Add document ID for unique identification
+          'id': doc.id,
           'timestamp_raw': timestamp,
           'icon': Icons.arrow_downward,
           'name': 'From $senderName',
@@ -227,31 +211,24 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
     if (mounted) {
       setState(() {
-        // Remove old transactions from this type (sent or received) and add new ones
-        // This ensures we always have the latest from each stream
         _recentTransactions.removeWhere((t) =>
             isSender ? t['icon'] == Icons.arrow_outward : t['icon'] == Icons.arrow_downward);
         _recentTransactions.addAll(currentStreamTransactions);
 
-        // Sort all transactions by timestamp (descending)
         _recentTransactions.sort((a, b) {
           final DateTime dateA = a['timestamp_raw'];
           final DateTime dateB = b['timestamp_raw'];
           return dateB.compareTo(dateA);
         });
 
-        // Take the top 2 most recent transactions overall for display on home screen
-        _recentTransactions = _recentTransactions.take(2).toList(); // Changed limit to 2
+        _recentTransactions = _recentTransactions.take(2).toList();
       });
       _logger.d('Final _recentTransactions list size: ${_recentTransactions.length}');
-      if (_recentTransactions.isNotEmpty) {
-        _logger.d('First transaction in list: ${_recentTransactions.first}');
-      }
     }
   }
 
 
-  // Helper function to format phone number for display
+  // Helper function to format phone number for display (e.g., remove country code prefix)
   String _formatPhoneNumberForDisplay(String rawPhoneNumber) {
     if (rawPhoneNumber.startsWith('+234')) {
       if (rawPhoneNumber.length > 4 && rawPhoneNumber[4] == '0') {
@@ -288,10 +265,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
-    _userBalanceSubscription?.cancel();
+    _merchantBalanceSubscription?.cancel();
     _sentTransactionsSubscription?.cancel();
     _receivedTransactionsSubscription?.cancel();
-    _animationController.dispose();
+    // Removed animation controller dispose as floating menu is removed
     super.dispose();
   }
 
@@ -310,36 +287,33 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _logger.d('Balance visibility toggled to: $_isBalanceVisible');
   }
 
-  void _toggleMenu() {
-    setState(() {
-      _isMenuOpen = !_isMenuOpen;
-    });
-    if (_isMenuOpen) {
-      _animationController.forward();
-    } else {
-      _animationController.reverse();
-    }
-  }
+  // Removed _toggleMenu, _buildMenuOverlay, _buildMenuGrid, _buildMenuItem, _buildFloatingMenuButton
 
   void _onItemTapped(int index) {
     setState(() {
       _selectedIndex = index;
     });
     _logger.i('Bottom navigation item tapped: $index');
-    if (index == 3) { // Profile tab
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => const UserProfileScreen()),
-      );
-      _logger.i('Profile tab selected. Navigating to UserProfileScreen.');
-    }
-    if (index == 0) { // Home tab - ensure it doesn't navigate away from itself unnecessarily
-      _fetchUserProfileAndBalance(); // Refresh balance on home tab tap
-      // No need to call _setupBalanceAndTransactionListeners here, as listeners are persistent
-    }
-    if (index == 1) {
-       _showMessageBox(context, 'Chats tab selected. Functionality not yet implemented.');
-       _logger.i('Chats tab selected. Functionality not yet implemented.');
+    switch (index) {
+      case 0: // Home tab
+        // No navigation needed, already on home. Can refresh data if desired.
+        _fetchMerchantProfileAndBalance(); // Refresh balance on home tab tap
+        break;
+      case 1: // Chat tab
+        _showMessageBox(context, 'Chats tab selected. Functionality not yet implemented for merchants.');
+        _logger.i('Chats tab selected. Functionality not yet implemented for merchants.');
+        break;
+      case 2: // Analytics tab
+        _showMessageBox(context, 'Analytics tab selected. Functionality not yet implemented for merchants.');
+        _logger.i('Analytics tab selected. Functionality not yet implemented for merchants.');
+        break;
+      case 3: // Profile tab
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => const MerchantProfileScreen()), // Navigate to MerchantProfileScreen
+        );
+        _logger.i('Profile tab selected. Navigating to MerchantProfileScreen.');
+        break;
     }
   }
 
@@ -347,34 +321,24 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF1C1C1E),
-      body: Stack(
-        children: [
-          SafeArea(
-            child: Column(
-              children: [
-                // Top Bar
-                _buildTopBar(),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Top Bar
+            _buildTopBar(),
 
-                // Balance Section
-                _buildBalanceSection(),
+            // Balance Section
+            _buildBalanceSection(),
 
-                // Quick Actions
-                _buildQuickActions(),
+            // Quick Actions (Merchant specific)
+            _buildQuickActions(),
 
-                // Recent Transactions
-                _buildRecentTransactions(),
+            // Recent Transactions
+            _buildRecentTransactions(),
 
-                const Spacer(),
-              ],
-            ),
-          ),
-
-          // Floating Menu Overlay
-          if (_isMenuOpen) _buildMenuOverlay(),
-
-          // Floating Menu Button
-          _buildFloatingMenuButton(),
-        ],
+            const Spacer(),
+          ],
+        ),
       ),
       bottomNavigationBar: BottomNavigationBar(
         backgroundColor: const Color(0xFF2C2C2E),
@@ -389,11 +353,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.chat_bubble_outline),
-            label: 'Chats',
+            label: 'Chat', // Changed from 'Chats'
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.credit_card),
-            label: 'Card',
+            icon: Icon(Icons.analytics), // Changed icon to analytics
+            label: 'Analytics',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.person),
@@ -409,9 +373,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 5),
       child: Row(
         children: [
-          // Display user's first name here
+          // Display merchant's name here
           Text(
-            'Hi, $_userFirstName',
+            'Hi, $_merchantName',
             style: const TextStyle(
               color: Colors.white,
               fontSize: 18,
@@ -422,7 +386,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           IconButton(
             icon: const Icon(Icons.notifications_outlined, color: Colors.white54),
             onPressed: () {
-              _logger.i('Notifications icon pressed');
+              _logger.i('Notifications icon pressed (Merchant Home)');
             },
           ),
         ],
@@ -438,7 +402,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           children: [
             GestureDetector(
               onTap: () {
-                _logger.i('Account number button tapped. Placeholder for dropdown.');
+                _logger.i('Account number button tapped (Merchant Home). Placeholder for dropdown.');
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -450,7 +414,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      _userAccountNumber,
+                      _merchantAccountNumber, // Display merchant account number
                       style: const TextStyle(color: Color.fromARGB(235, 255, 255, 255)),
                     ),
                     const SizedBox(width: 8),
@@ -494,17 +458,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          _buildQuickActionItem(Icons.phone_android, 'Airtime', () {
-            _logger.i('Airtime button pressed');
-            // Navigator.pushNamed(context, '/airtime'); // Example for Airtime
-          }),
           _buildQuickActionItem(Icons.send, 'Transfer', () {
-            _logger.i('Transfer button pressed');
-            Navigator.pushNamed(context, '/transfer_entry'); // Navigate to new TransferEntryScreen
+            _logger.i('Transfer button pressed (Merchant Home)');
+            Navigator.pushNamed(context, '/transfer_entry');
           }),
-          // Changed Bills to QR Code Generator
-          _buildQuickActionItem(Icons.qr_code, 'My QR Code', () {
-            _logger.i('My QR Code button pressed');
+          _buildQuickActionItem(Icons.qr_code_scanner, 'Receive', () { // Changed to Receive and QR Scanner icon
+            _logger.i('Receive (QR Scan) button pressed (Merchant Home)');
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => const QrScannerScreen()),
+            );
+          }),
+          _buildQuickActionItem(Icons.qr_code, 'My QR Code', () { // Changed to My QR Code and QR Code icon
+            _logger.i('My QR Code (Generate) button pressed (Merchant Home)');
             Navigator.push(
               context,
               MaterialPageRoute(builder: (context) => const QrGeneratorScreen()),
@@ -559,8 +525,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               ),
               TextButton(
                 onPressed: () {
-                  _logger.i('See All Transactions pressed');
-                  Navigator.pushNamed(context, '/all_transactions'); // Navigate to new AllTransactionsScreen
+                  _logger.i('See All Transactions pressed (Merchant Home)');
+                  Navigator.pushNamed(context, '/all_transactions');
                 },
                 child: const Text(
                   'See all',
@@ -595,7 +561,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             ListView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              itemCount: _recentTransactions.length, // This will now be max 2
+              itemCount: _recentTransactions.length,
               itemBuilder: (context, index) {
                 final transaction = _recentTransactions[index];
                 return _buildTransactionItem(
@@ -674,160 +640,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildMenuOverlay() {
-    return GestureDetector(
-      onTap: _toggleMenu,
-      child: Container(
-        color: Colors.black54,
-        child: SafeArea(
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: Container(
-              margin: const EdgeInsets.only(bottom: 100),
-              child: AnimatedBuilder(
-                animation: _scaleAnimation,
-                builder: (context, child) {
-                  return Transform.scale(
-                    scale: _scaleAnimation.value,
-                    child: Container(
-                      padding: const EdgeInsets.all(20),
-                      margin: const EdgeInsets.symmetric(horizontal: 20),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF2C2C2E),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Row(
-                            children: [
-                              Icon(Icons.apps, color: Colors.white),
-                              SizedBox(width: 8),
-                              Text(
-                                'All Menu',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 20),
-                          _buildMenuGrid(),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMenuGrid() {
-    return GridView.count(
-      shrinkWrap: true,
-      crossAxisCount: 2,
-      crossAxisSpacing: 16,
-      mainAxisSpacing: 16,
-      childAspectRatio: 1.2,
-      children: [
-        _buildMenuItem(Icons.phone_android, 'Airtime', Colors.purple),
-        _buildMenuItem(Icons.bar_chart, 'Data', Colors.blue),
-        _buildMenuItem(Icons.receipt_long, 'Bills', Colors.red),
-        _buildMenuItem(Icons.account_balance_wallet, 'Vault', Colors.green),
-        _buildMenuItem(Icons.credit_card, 'Cards', Colors.grey[800]!),
-        _buildMenuItem(Icons.qr_code_scanner, 'Scan', Colors.orange, () { // Modified to include onTap
-          _logger.i('Scan menu item pressed. Navigating to QR Scanner.');
-          _toggleMenu(); // Close menu
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (context) => const QrScannerScreen()),
-          );
-        }),
-      ],
-    );
-  }
-
-  Widget _buildMenuItem(IconData icon, String label, Color color, [VoidCallback? onTap]) { // Added optional onTap
-    return GestureDetector(
-      onTap: onTap ?? () { // Use provided onTap or default behavior
-        _logger.i('$label menu item pressed');
-        _toggleMenu(); // Close menu after selection
-      },
-      child: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: color,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(icon, color: Colors.white, size: 20),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFloatingMenuButton() {
-    return Positioned(
-      bottom: 30,
-      left: 0,
-      right: 0,
-      child: Center(
-        child: GestureDetector(
-          onTap: _toggleMenu,
-          child: AnimatedBuilder(
-            animation: _rotationAnimation,
-            builder: (context, child) {
-              return Transform.rotate(
-                angle: _rotationAnimation.value * 2 * 3.14159,
-                child: Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2C2C2E),
-                    borderRadius: BorderRadius.circular(30),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.3),
-                        blurRadius: 10,
-                        offset: const Offset(0, 5),
-                      ),
-                    ],
-                  ),
-                  child: Icon(
-                    _isMenuOpen ? Icons.close : Icons.apps,
-                    color: Colors.white,
-                    size: 24,
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
       ),
     );
   }

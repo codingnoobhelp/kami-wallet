@@ -83,6 +83,7 @@ class _PinSetupPageState extends State<PinSetupPage> {
 
     try {
       // Update the user document with the transaction PIN details
+      // This makes the transaction PIN universal for the user, regardless of account type (user/merchant)
       await FirebaseFirestore.instance.collection('users').doc(uid).set(
         {
           'transactionPinHash': hashedPin, // Save as transaction PIN hash

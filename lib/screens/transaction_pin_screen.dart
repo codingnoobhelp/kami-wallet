@@ -5,7 +5,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:crypto/crypto.dart';
 import 'dart:convert';
-import 'package:intl/intl.dart'; // For currency formatting in success screen arguments
+import 'package:local_auth/local_auth.dart';
+import 'package:intl/intl.dart';
 
 class TransactionPinScreen extends StatefulWidget {
   final String recipientName;
@@ -33,8 +34,9 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
   final Logger _logger = Logger();
   final TextEditingController _pinController = TextEditingController();
   bool _isLoading = false;
+  final LocalAuthentication _localAuth = LocalAuthentication();
+  bool _isBiometricEnabled = false;
 
-  // Pinput themes (similar to your other PIN screens)
   final defaultPinTheme = PinTheme(
     width: 60,
     height: 60,
@@ -62,19 +64,45 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
   );
 
   @override
+  void initState() {
+    super.initState();
+    _checkBiometricStatus();
+  }
+
+  @override
   void dispose() {
     _pinController.dispose();
     super.dispose();
   }
 
-  // Function to hash the PIN using SHA-256 (reused from PinSetupPage)
   String _hashPin(String pin) {
     final bytes = utf8.encode(pin);
     final digest = sha256.convert(bytes);
     return digest.toString();
   }
 
-  // Main function to verify PIN and execute transfer
+  Future<void> _checkBiometricStatus() async {
+    final User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+
+    try {
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(currentUser.uid)
+          .get();
+      if (userDoc.exists) {
+        final userData = userDoc.data() as Map<String, dynamic>?;
+        if (mounted) {
+          setState(() {
+            _isBiometricEnabled = userData?['biometricEnabled'] ?? false;
+          });
+        }
+      }
+    } catch (e) {
+      _logger.e('Error checking biometric status: $e');
+    }
+  }
+
   Future<void> _verifyPinAndExecuteTransfer() async {
     if (_pinController.text.length != 4) {
       _showMessageBox(context, 'Please enter your 4-digit transaction PIN.');
@@ -97,7 +125,6 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
     final String senderUid = currentUser.uid;
 
     try {
-      // 1. Fetch user's stored transaction PIN hash
       DocumentSnapshot userDoc = await FirebaseFirestore.instance.collection('users').doc(senderUid).get();
 
       if (!userDoc.exists || userDoc.data() == null) {
@@ -114,17 +141,15 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
         return;
       }
 
-      // 2. Verify entered PIN
       if (enteredPinHash != storedTransactionPinHash) {
         _showMessageBox(context, 'Incorrect transaction PIN. Please try again.');
-        _pinController.clear(); // Clear PIN input on failure
+        _pinController.clear();
         setState(() { _isLoading = false; });
         return;
       }
 
       _logger.i('Transaction PIN verified. Proceeding with transfer...');
 
-      // 3. Execute the actual money transfer (logic from TransferConfirmationScreen)
       final senderDocRef = FirebaseFirestore.instance.collection('users').doc(senderUid);
       final recipientDocRef = FirebaseFirestore.instance.collection('users').doc(widget.recipientUid);
 
@@ -146,16 +171,13 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
           throw Exception("Insufficient balance. Transfer cancelled.");
         }
 
-        // Update balances
         transaction.update(senderDocRef, {'accountBalance': senderBalance - widget.amount});
         transaction.update(recipientDocRef, {'accountBalance': recipientBalance + widget.amount});
 
-        // Get sender's name from the senderSnapshot within the transaction
         final senderFirstName = senderSnapshot.data()?['firstName'] ?? '';
         final senderLastName = senderSnapshot.data()?['lastName'] ?? '';
         final senderName = '$senderFirstName $senderLastName'.trim();
 
-        // Record transaction within the transaction block for atomicity
         final newTransactionRef = FirebaseFirestore.instance.collection('transactions').doc();
         transaction.set(newTransactionRef, {
           'amount': widget.amount,
@@ -172,7 +194,6 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
         _logger.i('Firestore transaction completed successfully.');
       });
 
-      // 4. Navigate to success screen
       if (mounted) {
         Navigator.pushNamedAndRemoveUntil(
           context,
@@ -199,6 +220,55 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
     }
   }
 
+  Future<void> _authenticateWithBiometrics() async {
+    if (!_isBiometricEnabled) {
+      _showMessageBox(context, 'Biometric authentication is not enabled. Please enable it in settings.');
+      return;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          title: const Text('Biometric Confirmation'),
+          content: const Text('Please authenticate with your fingerprint to confirm the transfer.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+
+    try {
+      bool authenticated = await _localAuth.authenticate(
+        localizedReason: 'Please authenticate to confirm the transfer',
+        options: const AuthenticationOptions(
+          stickyAuth: true,
+          biometricOnly: true,
+        ),
+      );
+
+      Navigator.pop(context);
+
+      if (authenticated) {
+        _logger.i('Biometric authentication successful. Proceeding with transfer...');
+        _verifyPinAndExecuteTransfer(); // Reuse the existing transfer logic
+      } else {
+        _logger.w('Biometric authentication cancelled or failed.');
+        _showMessageBox(context, 'Biometric authentication failed. Please use your PIN.');
+      }
+    } catch (e) {
+      Navigator.pop(context);
+      _logger.e('Error during biometric authentication: $e');
+      _showMessageBox(context, 'Error during biometric authentication: $e');
+    }
+  }
+
   void _showMessageBox(BuildContext context, String message) {
     showDialog(
       context: context,
@@ -220,15 +290,13 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
     );
   }
 
-  // Function to handle digit presses on the custom keypad
   void _onDigitPressed(String digit) {
-    if (_pinController.text.length < 4) { // 4-digit PIN
+    if (_pinController.text.length < 4) {
       _pinController.text += digit;
     }
     _logger.d('PIN input: ${_pinController.text}');
   }
 
-  // Function to handle backspace press
   void _onBackspacePressed() {
     if (_pinController.text.isNotEmpty) {
       _pinController.text = _pinController.text.substring(0, _pinController.text.length - 1);
@@ -242,7 +310,6 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
     final textColor = isDarkMode ? Colors.white : Colors.black;
     final hintColor = isDarkMode ? Colors.white70 : Colors.black54;
 
-    // Format amount for display
     final NumberFormat currencyFormatter = NumberFormat.currency(locale: 'en_NG', symbol: '₦');
     final String formattedAmount = currencyFormatter.format(widget.amount);
 
@@ -310,6 +377,40 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
               ),
             ),
             const Spacer(),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                // Biometric Button (Bottom Left)
+                if (_isBiometricEnabled)
+                  ElevatedButton(
+                    onPressed: _isLoading ? null : _authenticateWithBiometrics,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF007AFF),
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Row(
+                      children: const [
+                        Icon(Icons.fingerprint, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text(
+                          'Pay with Fingerprint',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                // Empty space on the right to balance the layout
+                const SizedBox(width: 100),
+              ],
+            ),
+            const SizedBox(height: 10),
             GridView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
@@ -329,7 +430,7 @@ class _TransactionPinScreenState extends State<TransactionPinScreen> {
                   return _buildKeypadButton(
                     '',
                     _onBackspacePressed,
-                    icon: Icons.backspace_outlined, // Changed to backspace icon
+                    icon: Icons.backspace_outlined,
                     buttonColor: Colors.red,
                     iconColor: Colors.white,
                   );

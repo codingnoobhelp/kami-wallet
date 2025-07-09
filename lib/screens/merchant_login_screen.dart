@@ -21,6 +21,7 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
   final Logger _logger = Logger();
   final _formKey = GlobalKey<FormBuilderState>();
   final TextEditingController _merchantIdController = TextEditingController();
+  final TextEditingController _phoneNumberController = TextEditingController(); // NEW: Phone number controller
   final TextEditingController _passcodeController = TextEditingController();
   final LocalAuthentication _localAuth = LocalAuthentication();
   bool _biometricEnabledForMerchant = false;
@@ -68,6 +69,7 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
   @override
   void dispose() {
     _merchantIdController.dispose();
+    _phoneNumberController.dispose(); // Dispose new controller
     _passcodeController.dispose();
     super.dispose();
   }
@@ -83,7 +85,16 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
     // For now, we'll assume no pre-filled data.
   }
 
-  // Fetch merchant data (name, login passcode hash, biometric enabled status) from Firestore
+  // Helper function to format phone number for display (e.g., 080... or 090...)
+  String _formatPhoneNumberForDisplay(String rawPhoneNumber) {
+    if (rawPhoneNumber.startsWith('+234')) {
+      // If it starts with +234, remove it and add a leading '0'
+      return '0${rawPhoneNumber.substring(4)}';
+    }
+    return rawPhoneNumber; // Return as is if no specific formatting applies
+  }
+
+  // Fetch merchant data (name, login passcode hash, biometric enabled status, and phone number) from Firestore
   // based on the provided Merchant ID.
   Future<void> _fetchMerchantDataById(String merchantId) async {
     setState(() {
@@ -106,9 +117,10 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
             _storedLoginPasscodeHash = merchantData['loginPasscodeHash'];
             _isLoginPasscodeSet = merchantData['loginPasscodeSet'] ?? false;
             _biometricEnabledForMerchant = merchantData['biometricEnabled'] ?? false;
+            _phoneNumberController.text = _formatPhoneNumberForDisplay(merchantData['phoneNumber'] ?? ''); // NEW: Set phone number
           });
         }
-        _logger.i('Merchant data loaded for $merchantId: Name: $_currentMerchantName, Login Passcode Set: $_isLoginPasscodeSet, Biometric Enabled: $_biometricEnabledForMerchant');
+        _logger.i('Merchant data loaded for $merchantId: Name: $_currentMerchantName, Phone: ${_phoneNumberController.text}, Login Passcode Set: $_isLoginPasscodeSet, Biometric Enabled: $_biometricEnabledForMerchant');
       } else {
         _logger.w('No merchant found for ID: $merchantId');
         if (mounted) {
@@ -122,6 +134,7 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
             _storedLoginPasscodeHash = null;
             _isLoginPasscodeSet = false;
             _biometricEnabledForMerchant = false;
+            _phoneNumberController.clear(); // Clear phone number
           });
         }
       }
@@ -229,8 +242,8 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
     bool canCheckBiometrics = await _localAuth.canCheckBiometrics;
     List<BiometricType> availableBiometrics = await _localAuth.getAvailableBiometrics();
 
-    if (!canCheckBiometrics || availableBiometrics.isEmpty) {
-      _showMessageBox(context, 'Biometric authentication not available or not set up on this device.');
+    if (!canCheckBiometrics || !availableBiometrics.contains(BiometricType.fingerprint)) { // Check specifically for fingerprint
+      _showMessageBox(context, 'Fingerprint authentication not available or not set up on this device.');
       return;
     }
 
@@ -241,7 +254,7 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
         builder: (context) => AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
           title: const Text('Biometric Authentication'),
-          content: const Text('Please authenticate using your device biometrics to log in.'),
+          content: const Text('Please authenticate using your device fingerprint to log in.'), // Updated text
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
@@ -254,8 +267,8 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
 
     try {
       bool authenticated = await _localAuth.authenticate(
-        localizedReason: 'Scan your biometrics to log in as merchant',
-        options: const AuthenticationOptions(biometricOnly: true),
+        localizedReason: 'Scan your fingerprint to log in as merchant', // Updated text
+        options: const AuthenticationOptions(biometricOnly: true), // Ensure only fingerprint is used
       );
       if (mounted) {
         Navigator.pop(context);
@@ -319,6 +332,7 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
     List<String? Function(String?)>? validators,
     Function(String?)? onChanged,
     bool obscureText = false,
+    bool readOnly = false, // Added readOnly parameter
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -338,6 +352,7 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
           keyboardType: keyboardType,
           style: const TextStyle(color: Colors.white),
           obscureText: obscureText,
+          readOnly: readOnly, // Apply readOnly
           decoration: InputDecoration(
             hintStyle: const TextStyle(color: Colors.grey),
             filled: true,
@@ -434,9 +449,23 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
                           _storedLoginPasscodeHash = null;
                           _isLoginPasscodeSet = false;
                           _biometricEnabledForMerchant = false;
+                          _phoneNumberController.clear(); // Clear phone number if merchant ID is cleared
                         });
                       }
                     },
+                  ),
+                  const SizedBox(height: 20),
+
+                  // NEW: Phone Number Field (Read-Only)
+                  _buildInputField(
+                    labelText: 'Phone Number',
+                    name: 'phone_number',
+                    controller: _phoneNumberController,
+                    keyboardType: TextInputType.phone,
+                    readOnly: true, // Make it read-only
+                    validators: [
+                      FormBuilderValidators.required(errorText: 'Phone number is required'),
+                    ],
                   ),
                   const SizedBox(height: 20),
 
@@ -524,15 +553,42 @@ class _MerchantLoginPageState extends State<MerchantLoginPage> {
             ),
             const SizedBox(height: 20),
 
-            // "Click to log in with Fingerprint"
+            // "Login with Fingerprint" button
+            Center(
+              child: ElevatedButton.icon( // Changed from TextButton to ElevatedButton.icon
+                onPressed: _authenticateWithBiometrics,
+                icon: const Icon(Icons.fingerprint, color: Colors.white), // Added fingerprint icon
+                label: const Text(
+                  'Login with Fingerprint', // Updated text
+                  style: TextStyle(
+                    color: Colors.white, // Changed text color for ElevatedButton
+                    fontSize: 16,
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00C853), // Green background for consistency
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20), // Spacing after the fingerprint button
+
+            // "Don't have an account? Sign Up" button
             Center(
               child: TextButton(
-                onPressed: _authenticateWithBiometrics,
+                onPressed: () {
+                  _logger.i('Merchant Sign Up button pressed.');
+                  Navigator.pushNamed(context, '/merchant_signup'); // Navigate to new merchant signup screen
+                },
                 child: const Text(
-                  'Click to log in with Fingerprint',
+                  "Don't have an account? Sign Up",
                   style: TextStyle(
-                    color: Color(0xFF00C853),
+                    color: Color(0xFF00C853), // Green color for consistency
                     fontSize: 16,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
               ),

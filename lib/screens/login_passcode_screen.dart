@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:logger/logger.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:crypto/crypto.dart'; // Import for hashing
-import 'dart:convert'; // Import for utf8.encode
-import 'package:pinput/pinput.dart'; // For passcode input
+import 'package:crypto/crypto.dart';
+import 'dart:convert';
+import 'package:pinput/pinput.dart';
+import 'package:local_auth/local_auth.dart';
 
-// Renamed from LoginSecurityScreen to LoginPasscodeScreen for clarity
 class LoginPasscodeScreen extends StatefulWidget {
   const LoginPasscodeScreen({super.key});
 
@@ -19,22 +19,24 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
   final TextEditingController _currentPasscodeController = TextEditingController();
   final TextEditingController _newPasscodeController = TextEditingController();
   final TextEditingController _confirmNewPasscodeController = TextEditingController();
+  final LocalAuthentication _localAuth = LocalAuthentication();
   bool _isLoading = false;
-  bool _loginPasscodeSet = false; // Tracks if a login passcode is already set
+  bool _loginPasscodeSet = false;
+  bool _biometricEnabled = false;
+  bool _isAuthenticating = false;
 
-  // Pinput themes (can be reused or customized)
   final defaultPinTheme = PinTheme(
     width: 60,
     height: 60,
     textStyle: const TextStyle(
       fontSize: 24,
-      color: Colors.black, // Adjust text color for white background
+      color: Colors.black,
       fontWeight: FontWeight.w600,
     ),
     decoration: BoxDecoration(
-      color: Colors.grey[200], // Light grey background for input fields
+      color: Colors.grey[200],
       borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: Colors.grey.shade400), // Subtle border
+      border: Border.all(color: Colors.grey.shade400),
     ),
   );
 
@@ -52,7 +54,7 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
   @override
   void initState() {
     super.initState();
-    _checkLoginPasscodeStatus();
+    _checkLoginPasscodeAndBiometricStatus();
   }
 
   @override
@@ -63,19 +65,17 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
     super.dispose();
   }
 
-  // Function to hash the passcode using SHA-256
   String _hashPasscode(String passcode) {
     final bytes = utf8.encode(passcode);
     final digest = sha256.convert(bytes);
     return digest.toString();
   }
 
-  // Check if login passcode is already set for the current user
-  Future<void> _checkLoginPasscodeStatus() async {
+  Future<void> _checkLoginPasscodeAndBiometricStatus() async {
     final User? currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) {
-      _logger.e('No authenticated user found to check login passcode status.');
-      if (mounted) _showMessageBox(context, 'Error: No authenticated user. Please log in again.');
+      _logger.e('No authenticated user found to check login passcode/biometric status.');
+      if (mounted) _showMessageBox(context, 'Error', 'No authenticated user. Please log in again.');
       return;
     }
 
@@ -90,37 +90,38 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
         if (mounted) {
           setState(() {
             _loginPasscodeSet = userData['loginPasscodeSet'] ?? false;
+            _biometricEnabled = userData['biometricEnabled'] ?? false;
           });
         }
-        _logger.i('Login passcode status for ${currentUser.uid}: $_loginPasscodeSet');
+        _logger.i('Login passcode status for ${currentUser.uid}: $_loginPasscodeSet, Biometric Enabled: $_biometricEnabled');
       } else {
-        _logger.w('User document not found for UID: ${currentUser.uid}. Assuming no login passcode set.');
+        _logger.w('User document not found for UID: ${currentUser.uid}. Assuming no login passcode/biometric set.');
         if (mounted) {
           setState(() {
             _loginPasscodeSet = false;
+            _biometricEnabled = false;
           });
         }
       }
     } on FirebaseException catch (e) {
-      _logger.e('Firestore Error checking login passcode status: ${e.message}');
-      if (mounted) _showMessageBox(context, 'Error loading login settings: ${e.message}');
+      _logger.e('Firestore Error checking login passcode/biometric status: ${e.message}');
+      if (mounted) _showMessageBox(context, 'Error', 'Error loading login settings: ${e.message}');
     } catch (e) {
-      _logger.e('An unexpected error occurred checking login passcode status: $e');
-      if (mounted) _showMessageBox(context, 'An unexpected error occurred. Please try again.');
+      _logger.e('An unexpected error occurred checking login passcode/biometric status: $e');
+      if (mounted) _showMessageBox(context, 'Error', 'An unexpected error occurred. Please try again.');
     }
   }
 
-  // Handle setting up a new login passcode
   Future<void> _setupNewLoginPasscode() async {
     final String newPasscode = _newPasscodeController.text;
     final String confirmPasscode = _confirmNewPasscodeController.text;
 
-    if (newPasscode.length != 6 || confirmPasscode.length != 6) { // 6 digits
-      _showMessageBox(context, 'Please enter a 6-digit passcode for both fields.');
+    if (newPasscode.length != 6 || confirmPasscode.length != 6) {
+      _showMessageBox(context, 'Error', 'Please enter a 6-digit passcode for both fields.');
       return;
     }
     if (newPasscode != confirmPasscode) {
-      _showMessageBox(context, 'New passcodes do not match.');
+      _showMessageBox(context, 'Error', 'New passcodes do not match.');
       return;
     }
 
@@ -131,7 +132,7 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
     final User? currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) {
       _logger.e('No authenticated user found to set login passcode.');
-      _showMessageBox(context, 'Error: No authenticated user. Please log in again.');
+      _showMessageBox(context, 'Error', 'Error: No authenticated user. Please log in again.');
       setState(() { _isLoading = false; });
       return;
     }
@@ -143,23 +144,23 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
           'loginPasscodeHash': hashedNewPasscode,
           'loginPasscodeSet': true,
         },
-        SetOptions(merge: true), // Use merge to only update specified fields
+        SetOptions(merge: true),
       );
 
       if (mounted) {
-        _showMessageBox(context, 'Login passcode set successfully!');
+        _showMessageBox(context, 'Success', 'Login passcode set successfully!');
         _newPasscodeController.clear();
         _confirmNewPasscodeController.clear();
         setState(() {
-          _loginPasscodeSet = true; // Update state to reflect passcode is now set
+          _loginPasscodeSet = true;
         });
       }
     } on FirebaseException catch (e) {
       _logger.e('Firestore Error setting login passcode: ${e.message}');
-      if (mounted) _showMessageBox(context, 'Failed to set passcode: ${e.message}');
+      if (mounted) _showMessageBox(context, 'Error', 'Failed to set passcode: ${e.message}');
     } catch (e) {
       _logger.e('An unexpected error occurred setting login passcode: $e');
-      if (mounted) _showMessageBox(context, 'An unexpected error occurred. Please try again.');
+      if (mounted) _showMessageBox(context, 'Error', 'An unexpected error occurred. Please try again.');
     } finally {
       setState(() {
         _isLoading = false;
@@ -167,18 +168,17 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
     }
   }
 
-  // Handle resetting an existing login passcode
   Future<void> _resetLoginPasscode() async {
     final String currentPasscode = _currentPasscodeController.text;
     final String newPasscode = _newPasscodeController.text;
     final String confirmPasscode = _confirmNewPasscodeController.text;
 
-    if (currentPasscode.length != 6 || newPasscode.length != 6 || confirmPasscode.length != 6) { // 6 digits
-      _showMessageBox(context, 'Please enter a 6-digit passcode for all fields.');
+    if (currentPasscode.length != 6 || newPasscode.length != 6 || confirmPasscode.length != 6) {
+      _showMessageBox(context, 'Error', 'Please enter a 6-digit passcode for all fields.');
       return;
     }
     if (newPasscode != confirmPasscode) {
-      _showMessageBox(context, 'New passcodes do not match.');
+      _showMessageBox(context, 'Error', 'New passcodes do not match.');
       return;
     }
 
@@ -189,13 +189,12 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
     final User? currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) {
       _logger.e('No authenticated user found to reset login passcode.');
-      _showMessageBox(context, 'Error: No authenticated user. Please log in again.');
+      _showMessageBox(context, 'Error', 'Error: No authenticated user. Please log in again.');
       setState(() { _isLoading = false; });
       return;
     }
 
     try {
-      // Verify current passcode
       DocumentSnapshot userDoc = await FirebaseFirestore.instance
           .collection('users')
           .doc(currentUser.uid)
@@ -203,29 +202,28 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
 
       final storedLoginPasscodeHash = (userDoc.data() as Map<String, dynamic>?)?['loginPasscodeHash'];
       if (storedLoginPasscodeHash == null || _hashPasscode(currentPasscode) != storedLoginPasscodeHash) {
-        _showMessageBox(context, 'Incorrect current passcode.');
+        _showMessageBox(context, 'Error', 'Incorrect current passcode.');
         setState(() { _isLoading = false; });
         return;
       }
 
-      // Update with new hashed passcode
       final String hashedNewPasscode = _hashPasscode(newPasscode);
       await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({
         'loginPasscodeHash': hashedNewPasscode,
       });
 
       if (mounted) {
-        _showMessageBox(context, 'Login passcode reset successfully!');
+        _showMessageBox(context, 'Success', 'Login passcode reset successfully!');
         _currentPasscodeController.clear();
         _newPasscodeController.clear();
         _confirmNewPasscodeController.clear();
       }
     } on FirebaseException catch (e) {
       _logger.e('Firestore Error resetting login passcode: ${e.message}');
-      if (mounted) _showMessageBox(context, 'Failed to reset passcode: ${e.message}');
+      if (mounted) _showMessageBox(context, 'Error', 'Failed to reset passcode: ${e.message}');
     } catch (e) {
       _logger.e('An unexpected error occurred resetting login passcode: $e');
-      if (mounted) _showMessageBox(context, 'An unexpected error occurred. Please try again.');
+      if (mounted) _showMessageBox(context, 'Error', 'An unexpected error occurred. Please try again.');
     } finally {
       setState(() {
         _isLoading = false;
@@ -233,13 +231,69 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
     }
   }
 
-  void _showMessageBox(BuildContext context, String message) {
+  Future<void> _toggleBiometricSetting(bool newValue) async {
+    setState(() {
+      _isAuthenticating = true;
+    });
+
+    final User? currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      _logger.e('No current user found. Cannot toggle biometric setting.');
+      if (mounted) _showMessageBox(context, 'Error', 'No authenticated user. Please log in again.');
+      setState(() { _isAuthenticating = false; });
+      return;
+    }
+
+    try {
+      bool canCheckBiometrics = await _localAuth.canCheckBiometrics;
+      List<BiometricType> availableBiometrics = await _localAuth.getAvailableBiometrics();
+
+      if (!canCheckBiometrics || availableBiometrics.isEmpty) {
+        if (mounted) _showMessageBox(context, 'Biometric Not Available', 'Your device does not support biometric authentication or it\'s not set up.');
+        setState(() { _isAuthenticating = false; });
+        return;
+      }
+
+      bool authenticated = await _localAuth.authenticate(
+        localizedReason: newValue
+            ? 'Enable biometric login for your account'
+            : 'Disable biometric login for your account',
+        options: const AuthenticationOptions(
+          stickyAuth: true,
+          biometricOnly: true,
+        ),
+      );
+
+      if (authenticated) {
+        await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).update({
+          'biometricEnabled': newValue,
+        });
+        if (mounted) {
+          setState(() {
+            _biometricEnabled = newValue;
+          });
+          _showMessageBox(context, 'Success', 'Biometric login has been ${newValue ? 'enabled' : 'disabled'}.');
+        }
+      } else {
+        if (mounted) _showMessageBox(context, 'Authentication Failed', 'Biometric authentication failed or cancelled. Setting not changed.');
+      }
+    } catch (e) {
+      _logger.e('Error during biometric authentication or update: $e');
+      if (mounted) _showMessageBox(context, 'Error', 'An error occurred during biometric operation: $e');
+    } finally {
+      setState(() {
+        _isAuthenticating = false;
+      });
+    }
+  }
+
+  void _showMessageBox(BuildContext context, String title, String message) {
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          title: const Text('Information'),
+          title: Text(title),
           content: Text(message),
           actions: <Widget>[
             TextButton(
@@ -266,7 +320,7 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
 
     return Pinput(
       controller: controller,
-      length: 6, // 6-digit passcode
+      length: 6,
       defaultPinTheme: defaultPinTheme.copyWith(
         textStyle: TextStyle(color: textColor),
         decoration: defaultPinTheme.decoration?.copyWith(
@@ -301,7 +355,7 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
-        title: Text('Login Passcode', style: TextStyle(color: textColor)), // Updated title
+        title: Text('Login Passcode', style: TextStyle(color: textColor)),
         centerTitle: true,
         backgroundColor: Theme.of(context).scaffoldBackgroundColor,
         foregroundColor: textColor,
@@ -403,6 +457,36 @@ class _LoginPasscodeScreenState extends State<LoginPasscodeScreen> {
               ),
             ),
             const SizedBox(height: 20),
+
+            Card(
+              margin: EdgeInsets.zero,
+              elevation: 2,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: SwitchListTile(
+                title: Text(
+                  'Enable Fingerprint/Face ID',
+                  style: TextStyle(fontSize: 16, color: textColor),
+                ),
+                value: _biometricEnabled,
+                onChanged: _isAuthenticating ? null : _toggleBiometricSetting,
+                activeColor: Colors.blueAccent,
+                inactiveTrackColor: Colors.grey[300],
+                secondary: Icon(Icons.fingerprint, color: Colors.grey[600], size: 28),
+              ),
+            ),
+            const SizedBox(height: 20),
+            if (_isAuthenticating)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Text(
+                    'Please authenticate using your device biometrics...',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
